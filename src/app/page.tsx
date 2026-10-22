@@ -1,18 +1,25 @@
+"use client";
+
 import Link from "next/link";
 import { MockBanner, Stat } from "@/components/ui";
 import { formatDate } from "@/lib/format";
 import { modules } from "@/lib/modules";
+import { useAsyncData } from "@/lib/use-async-data";
 import { CURRENT_EVENT_ID, getServices } from "@/services";
 
-export default async function Home() {
-  const { events, guests, logistics } = getServices();
-  const [event, guestList, rsvps, ids, checkIns] = await Promise.all([
-    events.getEvent(CURRENT_EVENT_ID),
-    guests.listGuests(CURRENT_EVENT_ID),
-    guests.listRsvps(CURRENT_EVENT_ID),
-    guests.listIdDocuments(CURRENT_EVENT_ID),
-    logistics.listCheckIns(CURRENT_EVENT_ID),
-  ]);
+export default function Home() {
+  const { data, loading } = useAsyncData(() => {
+    const { events, guests, logistics } = getServices();
+    return Promise.all([
+      events.getEvent(CURRENT_EVENT_ID),
+      guests.listGuests(CURRENT_EVENT_ID),
+      guests.listRsvps(CURRENT_EVENT_ID),
+      guests.listIdDocuments(CURRENT_EVENT_ID),
+      logistics.listCheckIns(CURRENT_EVENT_ID),
+    ]);
+  }, []);
+
+  const [event, guestList, rsvps, ids, checkIns] = data ?? [undefined, [], [], [], []];
 
   const responded = new Set(rsvps.filter((r) => r.status !== "pending").map((r) => r.guestId)).size;
   const arrived = new Set(checkIns.map((c) => c.guestId)).size;
@@ -20,7 +27,9 @@ export default async function Home() {
   return (
     <>
       <header className="mb-6">
-        <p className="text-sm font-medium uppercase tracking-wide text-accent">Avora</p>
+        <p className="text-sm font-medium uppercase tracking-wide text-accent">
+          {loading ? "Loading…" : "Event"}
+        </p>
         <h1 className="mt-1 text-3xl font-semibold">{event?.name}</h1>
         {event && (
           <p className="text-muted">

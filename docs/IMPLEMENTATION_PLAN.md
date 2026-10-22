@@ -37,13 +37,33 @@ implementations without touching the UI.
 
 ## Phase 1: Interactive mock prototype
 All still mock data, but the app *behaves* like the real thing.
-- **Client-side mock store** (e.g. Zustand with localStorage persistence) so changes survive reloads; a "Reset demo data" button
-- **Guests:** add/edit/delete, CSV import parsed in the browser, search and filters (side, tag, RSVP status)
-- **Guest profile page:** RSVP, travel, ID, room, baggage, check-ins, messages on one screen
-- **Functions:** create/edit
-- **RSVP:** change status per function from the UI
-- **Campaigns:** create flow (template → segment → cost preview → "send"); mock sender marks messages sent/delivered/read on a timer
-- **Mock WhatsApp simulator:** a fake phone panel showing what a guest would receive, with clickable RSVP buttons that update the dashboard
+- **Client-side mock store** ✅ Zustand (`src/store/data-store.ts`) persisted to `localStorage`, seeded
+  from `src/mocks/data.ts`. It's intentionally "dumb" (state + persistence + reset only) — all business
+  logic lives in `src/services/mock.ts`, the only module allowed to read/write it. Every page is a client
+  component that calls `getServices()` (via the `useAsyncData` hook) and re-fetches after a mutation;
+  nothing in `src/app` imports the store directly. A "Reset demo data" button lives in the global header
+  (`src/components/app-header.tsx`) and calls `services.system.resetDemoData()`.
+- **Guests:** ✅ add/edit/delete (`src/app/guests/guest-form-modal.tsx`), CSV import parsed in the browser
+  with a column-mapping + preview step (`src/app/guests/import-csv-modal.tsx`, `src/lib/csv.ts`), search
+  by name/phone, and filters by side/tag/RSVP status.
+- **Guest profile page:** ✅ `/guests/[id]` (`src/app/guests/[id]/`), tabbed: Overview (all fields
+  editable, phone shown masked), RSVP (inline status/headcount per function), Travel (add/edit/delete),
+  ID documents (masked number, expiry, verified toggle, local-only photo preview), Room (read-only, managed
+  from the Room Planner), Baggage (per-bag status + add form) and Messages (read-only campaign log).
+  Rows in `/guests` and guest names on the other module pages link here. Check-ins still to come.
+- **Functions:** ✅ create/edit/delete with confirmation (name, date, time, venue, description);
+  delete cascades the function's RSVPs. List stays in running order.
+- **RSVP:** ✅ guest × function matrix — clicking a cell cycles pending → attending → declined → maybe;
+  filters by family/side/tag; totals row per function (attending/declined/pending, + maybe when present).
+  Same `upsertRsvp` service call as the profile tab, so both stay in sync.
+- **Campaigns:** ✅ wizard (pick or write a template with `{{guest_name}}` / `{{function_name}}` →
+  audience: all / function attendees / side / tag → review with ₹0.85-per-recipient estimate → confirm & send).
+  `/campaigns/[id]` shows per-recipient delivery; the mock sender (in `services/mock.ts`) moves messages
+  queued → sent (1-2s) → delivered (3-5s) → read (8-12s) and views refresh through `messaging.subscribe()`.
+  In-flight sends resume after a reload.
+- **Mock WhatsApp simulator:** ✅ `components/whatsapp-preview.tsx` — slide-out phone rendering the
+  guest's messages with placeholders filled, plus Attending / Can't make it / Maybe quick replies that call
+  `guests.upsertRsvp` and answer in the thread. Opens from campaign detail and the profile's Messages tab.
 - **Travel / IDs:** forms to add details; ID "upload" uses local image preview only
 - **Room Planner:** drag-and-drop guests into rooms, capacity warnings
 - **Check-In:** one-tap "Arrived at airport / hotel"; mock notification log ("hotel notified", "welcome message sent")

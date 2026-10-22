@@ -19,6 +19,7 @@ export interface EventFunction {
   name: string;
   startsAt: string; // ISO datetime
   venue: string;
+  description?: string;
 }
 
 export type Side = "bride" | "groom" | "common";
@@ -37,6 +38,10 @@ export interface Guest {
   name: string;
   phone: string;
   isInternational: boolean;
+  /** Guest-level tags (e.g. "Vegetarian"); family-level tags live on the Party. */
+  tags?: string[];
+  /** Free-text planner notes about this guest. */
+  notes?: string;
   custom?: Record<string, unknown>;
 }
 
@@ -51,22 +56,33 @@ export interface Rsvp {
 
 export type TravelMode = "flight" | "train" | "road";
 
+export type TravelDirection = "arrival" | "departure";
+
 export interface Travel {
   id: string;
   guestId: string;
-  direction: "arrival" | "departure";
+  direction: TravelDirection;
   mode: TravelMode;
-  number: string;
+  number: string; // flight / train number, or vehicle for road
   datetime: string;
+  /** Airport, station or pickup point. */
+  airport?: string;
   pickupNeeded: boolean;
 }
+
+export type IdDocumentKind = "aadhaar" | "passport" | "driving_license" | "other";
+export type IdDocumentSide = "front" | "back";
 
 export interface IdDocument {
   id: string;
   guestId: string;
-  kind: "aadhaar" | "passport" | "driving_license" | "other";
+  kind: IdDocumentKind;
   maskedNumber: string;
-  sides: ("front" | "back")[];
+  /** ISO date. Optional: Aadhaar has no expiry. */
+  expiresAt?: string;
+  /** Which sides the guest has sent a photo of. Images themselves are never
+   * stored in the mock phase. */
+  sides: IdDocumentSide[];
   verified: boolean;
 }
 
@@ -82,10 +98,11 @@ export interface Room {
 
 export type BaggageStatus = "at_airport" | "in_transit" | "in_room";
 
+// One record per bag so each can be tracked individually.
 export interface Baggage {
+  id: string;
   guestId: string;
-  count: number;
-  tags: string[];
+  tag: string; // printed luggage tag, e.g. AV-001
   status: BaggageStatus;
 }
 
@@ -110,16 +127,39 @@ export interface MessageTemplate {
 
 export type CampaignStatus = "draft" | "scheduled" | "sending" | "sent";
 
+// Who a campaign goes to. Resolved to concrete guests by the service at
+// create/send time so the recipient list is a snapshot, not a live query.
+export type CampaignAudience =
+  | { type: "all" }
+  | { type: "function"; functionId: string } // guests RSVP'd attending
+  | { type: "side"; side: Side }
+  | { type: "tag"; tag: string }; // family or guest tag, or "International"
+
 export interface Campaign {
   id: string;
   eventId: string;
   name: string;
   templateId: string;
-  segment: string;
+  audience: CampaignAudience;
+  segment: string; // human-readable audience label
   recipients: number;
   status: CampaignStatus;
   estimatedCost: number; // INR
+  createdAt: string;
   sentAt?: string;
+}
+
+export type MessageStatus = "queued" | "sent" | "delivered" | "read" | "failed";
+
+// One WhatsApp message delivered to one guest as part of a campaign.
+export interface Message {
+  id: string;
+  campaignId: string;
+  guestId: string;
+  status: MessageStatus;
+  sentAt: string; // when it was handed to the provider (queued)
+  deliveredAt?: string;
+  readAt?: string;
 }
 
 export interface CallLog {

@@ -2,8 +2,11 @@
 
 Event management over WhatsApp. Weddings first, built to scale to other event types.
 
-**Current phase: mocks only.** No external services are called; all data comes from
-`src/mocks/data.ts` through the service layer in `src/services/`.
+**Current phase: mocks only.** No external services are called. Data is seeded from
+`src/mocks/data.ts` into a client-side Zustand store (`src/store/data-store.ts`) that
+persists to `localStorage`, and every read/write goes through the service layer in
+`src/services/`. Use "Reset demo data" in the header to wipe local changes and restore
+the original seed data.
 
 See [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md) for phases and scope.
 
