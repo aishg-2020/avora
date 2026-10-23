@@ -1,12 +1,11 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
 import { Badge, Button, DataTable, MockBanner, PageHeader } from "@/components/ui";
 import { formatDateTime, formatINR } from "@/lib/format";
-import { deliveryCounts } from "@/lib/campaign-helpers";
-import type { Campaign, CampaignStatus } from "@/lib/types";
+import type { Campaign, CampaignStatus, Message } from "@/lib/types";
 import { useAsyncData } from "@/lib/use-async-data";
 import { CURRENT_EVENT_ID, getServices } from "@/services";
 
@@ -21,33 +20,40 @@ const statusTone: Record<CampaignStatus, "good" | "warn" | "neutral"> = {
 
 export default function CampaignsPage() {
   const router = useRouter();
-  const { data, loading, reload } = useAsyncData(() => {
+  const { data, loading, reload } = useAsyncData(async () => {
     const { messaging } = getServices();
-    return Promise.all([
+    const [campaigns, templates] = await Promise.all([
       messaging.listCampaigns(CURRENT_EVENT_ID),
       messaging.listTemplates(),
-      messaging.listMessages(CURRENT_EVENT_ID),
     ]);
+    const messagesByCampaign = new Map<string, Message[]>(
+      await Promise.all(
+        campaigns.map(async (c) => [c.id, await messaging.listMessages(c.id)] as const),
+      ),
+    );
+    return { campaigns, templates, messagesByCampaign };
   }, []);
-  const [campaigns, templates, messages] = data ?? [[], [], []];
+  const { campaigns = [], templates = [], messagesByCampaign = new Map<string, Message[]>() } = data ?? {};
   const templateById = new Map(templates.map((t) => [t.id, t]));
+
   const [wizardOpen, setWizardOpen] = useState(false);
 
-  // Keep the counts live while a simulated send is in progress.
-  useEffect(() => getServices().messaging.subscribe(reload), [reload]);
-
-  function handleDone(campaign: Campaign, sent: boolean) {
-    setWizardOpen(false);
-    if (sent) router.push(`/campaigns/${campaign.id}`);
-    else reload();
-  }
+  const counts = (c: Campaign) => {
+    const msgs = messagesByCampaign.get(c.id) ?? [];
+    // "Sent" counts everything that left the queue; delivered/read are subsets.
+    return {
+      sent: msgs.filter((m) => m.status === "sent" || m.status === "delivered" || m.status === "read").length,
+      delivered: msgs.filter((m) => m.status === "delivered" || m.status === "read").length,
+      read: msgs.filter((m) => m.status === "read").length,
+    };
+  };
 
   return (
     <>
       <PageHeader title="Campaigns" description="Bulk WhatsApp sends with a cost preview before sending." />
       <MockBanner />
 
-      <div className="mb-3 flex items-center justify-between">
+      <div className="mb-4 flex items-center justify-between">
         <h2 className="text-lg font-semibold">Campaigns</h2>
         <Button variant="primary" onClick={() => setWizardOpen(true)}>
           + New campaign
@@ -58,29 +64,29 @@ export default function CampaignsPage() {
         rows={campaigns}
         rowKey={(c) => c.id}
         onRowClick={(c) => router.push(`/campaigns/${c.id}`)}
-        empty="No campaigns yet. Create one to message your guests."
+        empty="No campaigns yet. Create the first one."
         columns={[
           { header: "Name", cell: (c) => <span className="font-medium">{c.name}</span> },
           { header: "Template", cell: (c) => templateById.get(c.templateId)?.name },
-          { header: "Audience", cell: (c) => c.segment },
+          { header: "Segment", cell: (c) => c.segment },
           { header: "Recipients", cell: (c) => c.recipients },
           { header: "Est. cost", cell: (c) => formatINR(c.estimatedCost) },
           { header: "Status", cell: (c) => <Badge tone={statusTone[c.status]}>{c.status}</Badge> },
           {
-            header: "Sent / Delivered / Read",
+            header: "Delivery",
             cell: (c) => {
-              if (c.status === "draft" || c.status === "scheduled") return <span className="text-muted">—</span>;
-              const n = deliveryCounts(messages.filter((m) => m.campaignId === c.id));
+              const k = counts(c);
+              if ((messagesByCampaign.get(c.id) ?? []).length === 0) return <span className="text-muted">—</span>;
               return (
-                <span className="font-mono text-xs">
-                  <span title="Sent">{n.sent}</span> / <span title="Delivered">{n.delivered}</span> /{" "}
-                  <span title="Read">{n.read}</span>
-                  {n.failed > 0 && <span className="ml-1 text-rose-600 dark:text-rose-400">({n.failed} failed)</span>}
-                </span>
+                <div className="flex flex-col gap-0.5 text-xs">
+                  <span>{k.sent} sent</span>
+                  <span className="text-emerald-700 dark:text-emerald-400">{k.delivered} delivered</span>
+                  <span className="text-sky-700 dark:text-sky-400">{k.read} read</span>
+                </div>
               );
             },
           },
-          { header: "Sent", cell: (c) => (c.sentAt ? formatDateTime(c.sentAt) : "—") },
+          { header: "Sent at", cell: (c) => (c.sentAt ? formatDateTime(c.sentAt) : "—") },
         ]}
       />
 
@@ -94,12 +100,20 @@ export default function CampaignsPage() {
           { header: "Body", cell: (t) => <span className="text-muted">{t.body}</span> },
         ]}
       />
+      <p className="mt-2 text-xs text-muted">
+        Templates support the <code className="font-mono">{"{{guest_name}}"}</code> and{" "}
+        <code className="font-mono">{"{{function_name}}"}</code> placeholders.
+      </p>
 
       <NewCampaignModal
-        key={wizardOpen ? "open" : "closed"}
+        key={wizardOpen ? "open" : "idle"}
         open={wizardOpen}
         onClose={() => setWizardOpen(false)}
-        onDone={handleDone}
+        onSent={(campaignId) => {
+          setWizardOpen(false);
+          reload();
+          router.push(`/campaigns/${campaignId}`);
+        }}
       />
     </>
   );

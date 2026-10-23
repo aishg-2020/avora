@@ -2,15 +2,14 @@
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 
 import { GuestLink } from "@/components/guest-link";
-import { Badge, Button, DataTable, MockBanner, Modal, PageHeader, Stat } from "@/components/ui";
-import { WhatsAppPreview } from "@/components/whatsapp-preview";
-import { deliveryCounts } from "@/lib/campaign-helpers";
-import { formatDateTime, formatINR, maskPhone } from "@/lib/format";
-import { renderTemplate } from "@/lib/templates";
-import type { CampaignStatus, Guest, MessageStatus } from "@/lib/types";
+import { Badge, Button, DataTable, MockBanner, Stat } from "@/components/ui";
+import { WhatsAppSimulator } from "@/components/whatsapp-simulator";
+import { formatDateTime, formatINR } from "@/lib/format";
+import { renderTemplate } from "@/lib/template";
+import type { Campaign, CampaignStatus, Guest, Message, MessageStatus } from "@/lib/types";
 import { useAsyncData } from "@/lib/use-async-data";
 import { CURRENT_EVENT_ID, getServices } from "@/services";
 
@@ -20,6 +19,7 @@ const statusTone: Record<CampaignStatus, "good" | "warn" | "neutral"> = {
   scheduled: "neutral",
   draft: "neutral",
 };
+
 const messageTone: Record<MessageStatus, "good" | "warn" | "bad" | "neutral"> = {
   read: "good",
   delivered: "good",
@@ -28,217 +28,176 @@ const messageTone: Record<MessageStatus, "good" | "warn" | "bad" | "neutral"> = 
   failed: "bad",
 };
 
+const isTerminal = (m: Message) => m.status === "read" || m.status === "failed";
+
 export function CampaignDetail() {
-  const { id } = useParams<{ id: string }>();
-  const { data, loading, reload } = useAsyncData(async () => {
+  const params = useParams<{ id: string }>();
+  const campaignId = params.id;
+
+  // Static context: templates, guests, functions, event.
+  const { data: context } = useAsyncData(() => {
     const { events, guests, messaging } = getServices();
-    const campaign = await messaging.getCampaign(id);
-    if (!campaign) return { campaign: undefined };
-    const [event, functions, templates, messages, guestList, audienceNow] = await Promise.all([
-      events.getEvent(CURRENT_EVENT_ID),
-      events.listFunctions(CURRENT_EVENT_ID),
+    return Promise.all([
       messaging.listTemplates(),
-      messaging.listMessagesForCampaign(id),
       guests.listGuests(CURRENT_EVENT_ID),
-      messaging.resolveAudience(CURRENT_EVENT_ID, campaign.audience),
+      events.listFunctions(CURRENT_EVENT_ID),
+      events.getEvent(CURRENT_EVENT_ID),
     ]);
-    return { campaign, event, functions, templates, messages, guestList, audienceNow };
-  }, [id]);
+  }, []);
+  const [templates, guestList, functions, event] = context ?? [[], [], [], undefined];
 
-  // Delivery updates arrive through the service subscription — no reload.
-  useEffect(() => getServices().messaging.subscribe(reload), [reload]);
+  // Live data: campaign + messages, polled every second while the delivery
+  // simulation is still running so status changes appear without a reload.
+  const [campaign, setCampaign] = useState<Campaign | null | undefined>(undefined);
+  const [messages, setMessages] = useState<Message[]>([]);
+  useEffect(() => {
+    let active = true;
+    let timer: ReturnType<typeof setInterval> | undefined;
+    const load = async () => {
+      const { messaging } = getServices();
+      const [c, ms] = await Promise.all([messaging.getCampaign(campaignId), messaging.listMessages(campaignId)]);
+      if (!active) return;
+      setCampaign(c ?? null);
+      setMessages(ms);
+      const done = !c || c.status !== "sending" ? ms.every(isTerminal) : false;
+      if (done && ms.length > 0 && timer) {
+        clearInterval(timer);
+        timer = undefined;
+      }
+    };
+    load();
+    timer = setInterval(load, 1000);
+    return () => {
+      active = false;
+      if (timer) clearInterval(timer);
+    };
+  }, [campaignId]);
 
-  const [confirmOpen, setConfirmOpen] = useState(false);
-  const [sending, setSending] = useState(false);
-  const [previewGuestId, setPreviewGuestId] = useState<string | null>(null);
+  const [previewGuest, setPreviewGuest] = useState<Guest | null>(null);
 
-  const campaign = data?.campaign;
-  const messages = useMemo(() => data?.messages ?? [], [data]);
-  const guestById = useMemo(() => new Map((data?.guestList ?? []).map((g) => [g.id, g])), [data]);
-  const template = data?.templates?.find((t) => t.id === campaign?.templateId);
-  const audience = campaign?.audience;
-  const functionName =
-    audience?.type === "function" ? data?.functions?.find((f) => f.id === audience.functionId)?.name : undefined;
-
-  if (loading && !data) {
+  if (campaign === undefined) {
     return (
       <>
-        <PageHeader title="Campaign" />
+        <BackLink />
         <p className="text-muted">Loading…</p>
       </>
     );
   }
-  if (!campaign) {
+
+  if (campaign === null) {
     return (
       <>
-        <PageHeader title="Campaign not found" description="It may have been removed or the demo data was reset." />
-        <Link href="/campaigns" className="text-accent hover:underline">
-          Back to campaigns
-        </Link>
+        <BackLink />
+        <p className="text-muted">Campaign not found. It may have been removed.</p>
       </>
     );
   }
 
-  const isDraft = campaign.status === "draft" || campaign.status === "scheduled";
-  const counts = deliveryCounts(messages);
+  const template = templates.find((t) => t.id === campaign.templateId);
+  const guestById = new Map(guestList.map((g) => [g.id, g]));
+  const targetFunctionId = campaign.audience?.kind === "function" ? campaign.audience.functionId : undefined;
+  const targetFunction = functions.find((f) => f.id === targetFunctionId);
 
-  // Recipient rows: real messages once sent, otherwise the live audience.
-  type Row = { guest: Guest | undefined; guestId: string; status?: MessageStatus; sentAt?: string; deliveredAt?: string; readAt?: string; key: string };
-  const rows: Row[] = isDraft
-    ? (data?.audienceNow ?? []).map((g) => ({ guest: g, guestId: g.id, key: g.id }))
-    : messages.map((m) => ({ guest: guestById.get(m.guestId), guestId: m.guestId, status: m.status, sentAt: m.sentAt, deliveredAt: m.deliveredAt, readAt: m.readAt, key: m.id }));
-  const previewOptions = rows.map((r) => r.guest).filter((g): g is Guest => Boolean(g));
-
-  async function send() {
-    setSending(true);
-    try {
-      await getServices().messaging.sendCampaign(campaign!.id);
-      setConfirmOpen(false);
-      reload();
-    } finally {
-      setSending(false);
-    }
-  }
-
-  const sampleGuest = previewOptions[0];
-  const sampleText = renderTemplate(template?.body ?? "", {
-    guestName: sampleGuest?.name.split(" ")[0] ?? "Guest",
-    functionName,
-    eventName: data?.event?.name ?? "the event",
-  });
+  const count = (pred: (m: Message) => boolean) => messages.filter(pred).length;
+  const sent = count((m) => m.status === "sent" || m.status === "delivered" || m.status === "read");
+  const delivered = count((m) => m.status === "delivered" || m.status === "read");
+  const read = count((m) => m.status === "read");
+  const live = campaign.status === "sending" || messages.some((m) => !isTerminal(m));
 
   return (
     <>
-      <Link href="/campaigns" className="mb-4 inline-block text-sm text-muted hover:text-foreground">
-        ← Campaigns
-      </Link>
-      <header className="mb-6 flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <div className="flex items-center gap-2">
-            <h1 className="text-2xl font-semibold">{campaign.name}</h1>
-            <Badge tone={statusTone[campaign.status]}>{campaign.status}</Badge>
-          </div>
-          <p className="mt-1 text-sm text-muted">
-            {template?.name} · {campaign.segment} · {campaign.recipients} recipient{campaign.recipients === 1 ? "" : "s"} ·{" "}
-            {formatINR(campaign.estimatedCost)}
-            {campaign.sentAt && ` · sent ${formatDateTime(campaign.sentAt)}`}
-          </p>
+      <BackLink />
+      <header className="mb-6">
+        <div className="flex flex-wrap items-center gap-3">
+          <h1 className="text-2xl font-semibold">{campaign.name}</h1>
+          <Badge tone={statusTone[campaign.status]}>{campaign.status}</Badge>
+          {live && messages.length > 0 && <span className="text-sm text-muted">updating live…</span>}
         </div>
-        <div className="flex gap-2">
-          <Button variant="secondary" onClick={() => setPreviewGuestId(sampleGuest?.id ?? null)} disabled={!sampleGuest}>
-            Preview as guest
-          </Button>
-          {isDraft && (
-            <Button variant="primary" onClick={() => setConfirmOpen(true)} disabled={rows.length === 0}>
-              Send campaign
-            </Button>
-          )}
-        </div>
+        <p className="mt-1 text-sm text-muted">
+          {template?.name ?? "Unknown template"} · {campaign.segment} ·{" "}
+          {campaign.sentAt ? `sent ${formatDateTime(campaign.sentAt)}` : "not sent yet"} · est.{" "}
+          {formatINR(campaign.estimatedCost)}
+        </p>
       </header>
 
       <MockBanner />
 
-      <section className="mb-6 rounded-xl border border-border p-4">
-        <p className="mb-1 text-xs text-muted">Message{sampleGuest ? ` as ${sampleGuest.name} will see it` : ""}</p>
-        <p className="inline-block rounded-lg bg-[#dcf8c6] px-3 py-2 text-sm text-neutral-900">{sampleText}</p>
+      <section className="mb-8 grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <Stat label="Recipients" value={campaign.recipients} />
+        <Stat label="Sent" value={`${sent}/${messages.length || campaign.recipients}`} />
+        <Stat label="Delivered" value={`${delivered}/${messages.length || campaign.recipients}`} />
+        <Stat label="Read" value={`${read}/${messages.length || campaign.recipients}`} />
       </section>
 
-      {!isDraft && (
-        <section className="mb-6">
-          <div className="mb-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
-            <Stat label="Queued" value={counts.queued} />
-            <Stat label="Sent" value={counts.sent} />
-            <Stat label="Delivered" value={counts.delivered} />
-            <Stat label="Read" value={counts.read} />
+      {template && (
+        <section className="mb-8">
+          <p className="mb-1 text-sm text-muted">Message</p>
+          <div className="w-fit max-w-xl rounded-lg rounded-tl-none bg-surface px-3 py-2 text-sm shadow-sm">
+            {template.body}
           </div>
-          <Progress counts={counts} />
         </section>
       )}
 
-      <h2 className="mb-3 text-lg font-semibold">
-        {isDraft ? `Recipients right now (${rows.length})` : `Recipients (${rows.length})`}
-      </h2>
-      {isDraft && (
-        <p className="mb-3 text-sm text-muted">
-          The audience is resolved again when you send, so this list reflects the latest RSVPs and tags.
-        </p>
-      )}
+      <h2 className="mb-3 text-lg font-semibold">Recipients</h2>
       <DataTable
-        rows={rows}
-        rowKey={(r) => r.key}
-        empty="Nobody matches this audience right now."
+        rows={messages}
+        rowKey={(m) => m.id}
+        empty="No messages yet — this campaign hasn't been sent."
         columns={[
-          { header: "Guest", cell: (r) => <GuestLink id={r.guestId} name={r.guest?.name} /> },
-          { header: "Phone", cell: (r) => <span className="font-mono text-xs">{r.guest ? maskPhone(r.guest.phone) : "—"}</span> },
           {
-            header: "Status",
-            cell: (r) => (r.status ? <Badge tone={messageTone[r.status]}>{r.status}</Badge> : <Badge>not sent</Badge>),
+            header: "Guest",
+            cell: (m) => <GuestLink id={m.guestId} name={guestById.get(m.guestId)?.name} />,
           },
-          { header: "Sent", cell: (r) => (r.sentAt ? formatDateTime(r.sentAt) : "—") },
-          { header: "Delivered", cell: (r) => (r.deliveredAt ? formatDateTime(r.deliveredAt) : "—") },
-          { header: "Read", cell: (r) => (r.readAt ? formatDateTime(r.readAt) : "—") },
+          {
+            header: "Message",
+            cell: (m) => {
+              const g = guestById.get(m.guestId);
+              if (!template || !g) return "—";
+              return (
+                <span className="text-muted">
+                  {renderTemplate(template.body, {
+                    guestName: g.name,
+                    functionName: targetFunction?.name ?? event?.name ?? "the celebrations",
+                    eventName: event?.name ?? "the celebrations",
+                  })}
+                </span>
+              );
+            },
+          },
+          { header: "Sent at", cell: (m) => formatDateTime(m.sentAt) },
+          { header: "Status", cell: (m) => <Badge tone={messageTone[m.status]}>{m.status}</Badge> },
           {
             header: "",
-            cell: (r) => (
-              <Button variant="ghost" onClick={() => setPreviewGuestId(r.guestId)} disabled={!r.guest}>
-                Preview
-              </Button>
-            ),
+            cell: (m) => {
+              const g = guestById.get(m.guestId);
+              if (!g || !template) return null;
+              return (
+                <Button variant="secondary" onClick={() => setPreviewGuest(g)}>
+                  Preview as guest
+                </Button>
+              );
+            },
           },
         ]}
       />
 
-      <Modal open={confirmOpen} onClose={() => setConfirmOpen(false)} title="Send this campaign?">
-        <div className="space-y-3 text-sm">
-          <p>
-            “{campaign.name}” will go to <strong>{rows.length}</strong> guest{rows.length === 1 ? "" : "s"} using the{" "}
-            <strong>{template?.name}</strong> template.
-          </p>
-          <p className="text-muted">
-            Estimated cost {formatINR(campaign.estimatedCost)}. This is a simulation — nothing is sent for real.
-          </p>
-          <div className="flex justify-end gap-2 pt-2">
-            <Button variant="ghost" onClick={() => setConfirmOpen(false)} disabled={sending}>
-              Cancel
-            </Button>
-            <Button variant="primary" onClick={send} disabled={sending}>
-              {sending ? "Sending…" : "Confirm & send"}
-            </Button>
-          </div>
-        </div>
-      </Modal>
-
-      {previewGuestId && (
-        <WhatsAppPreview
+      {previewGuest && template && (
+        <WhatsAppSimulator
           open
-          onClose={() => setPreviewGuestId(null)}
-          guestId={previewGuestId}
-          campaignId={campaign.id}
-          guestOptions={previewOptions}
-          onGuestChange={setPreviewGuestId}
+          onClose={() => setPreviewGuest(null)}
+          guest={previewGuest}
+          template={template}
+          functionId={targetFunctionId}
         />
       )}
     </>
   );
 }
 
-function Progress({ counts }: { counts: ReturnType<typeof deliveryCounts> }) {
-  const total = counts.total || 1;
-  const pct = (n: number) => `${Math.round((n / total) * 100)}%`;
+function BackLink() {
   return (
-    <div>
-      <div className="flex h-2 w-full overflow-hidden rounded-full bg-surface" aria-hidden>
-        <div className="bg-emerald-500 transition-all duration-500" style={{ width: pct(counts.read) }} />
-        <div className="bg-emerald-300 transition-all duration-500" style={{ width: pct(counts.delivered - counts.read) }} />
-        <div className="bg-neutral-400 transition-all duration-500" style={{ width: pct(counts.sent - counts.delivered) }} />
-      </div>
-      <p className="mt-1 text-xs text-muted">
-        {counts.read === counts.total
-          ? "Everyone has read it."
-          : counts.queued > 0
-            ? "Sending…"
-            : `${counts.total - counts.read} still to be read.`}
-      </p>
-    </div>
+    <Link href="/campaigns" className="mb-4 inline-block text-sm text-muted hover:text-foreground">
+      ← Campaigns
+    </Link>
   );
 }

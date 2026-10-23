@@ -68,6 +68,8 @@ export interface Travel {
   /** Airport, station or pickup point. */
   airport?: string;
   pickupNeeded: boolean;
+  /** Set once the planner has organised the pickup/drop. Only meaningful when pickupNeeded. */
+  pickupArranged?: boolean;
 }
 
 export type IdDocumentKind = "aadhaar" | "passport" | "driving_license" | "other";
@@ -96,13 +98,14 @@ export interface Room {
   guestIds: string[];
 }
 
-export type BaggageStatus = "at_airport" | "in_transit" | "in_room";
+export type BaggageStatus = "checked_in" | "on_belt" | "collected";
 
 // One record per bag so each can be tracked individually.
 export interface Baggage {
   id: string;
   guestId: string;
   tag: string; // printed luggage tag, e.g. AV-001
+  description?: string; // "Black Samsonite, red ribbon"
   status: BaggageStatus;
 }
 
@@ -116,6 +119,19 @@ export interface CheckIn {
   by: string;
 }
 
+export type NotificationKind = "hotel" | "whatsapp" | "driver" | "baggage" | "host";
+
+// Mock outbound notification triggered by a check-in: what *would* have
+// been sent to the hotel, the guest, the driver, etc.
+export interface Notification {
+  id: string;
+  guestId: string;
+  stage: CheckInStage;
+  kind: NotificationKind;
+  text: string;
+  at: string;
+}
+
 export type TemplateCategory = "marketing" | "utility";
 
 export interface MessageTemplate {
@@ -127,25 +143,25 @@ export interface MessageTemplate {
 
 export type CampaignStatus = "draft" | "scheduled" | "sending" | "sent";
 
-// Who a campaign goes to. Resolved to concrete guests by the service at
-// create/send time so the recipient list is a snapshot, not a live query.
+// Structured targeting for a campaign. `segment` on Campaign stays the
+// human-readable label derived from this.
 export type CampaignAudience =
-  | { type: "all" }
-  | { type: "function"; functionId: string } // guests RSVP'd attending
-  | { type: "side"; side: Side }
-  | { type: "tag"; tag: string }; // family or guest tag, or "International"
+  | { kind: "all" }
+  | { kind: "function"; functionId: string } // guests attending that function
+  | { kind: "side"; side: Side }
+  | { kind: "tag"; tag: string }; // family/guest tag, or "International"
 
 export interface Campaign {
   id: string;
   eventId: string;
   name: string;
   templateId: string;
-  audience: CampaignAudience;
-  segment: string; // human-readable audience label
+  segment: string;
+  /** Missing on legacy/seed drafts that only have a label. */
+  audience?: CampaignAudience;
   recipients: number;
   status: CampaignStatus;
   estimatedCost: number; // INR
-  createdAt: string;
   sentAt?: string;
 }
 
@@ -157,9 +173,7 @@ export interface Message {
   campaignId: string;
   guestId: string;
   status: MessageStatus;
-  sentAt: string; // when it was handed to the provider (queued)
-  deliveredAt?: string;
-  readAt?: string;
+  sentAt: string;
 }
 
 export interface CallLog {

@@ -79,3 +79,34 @@ export function parseBoolean(value: string | undefined): boolean {
   if (!value) return false;
   return ["yes", "y", "true", "1", "international"].includes(value.trim().toLowerCase());
 }
+
+// ---------------------------------------------------------------------------
+// Export side: build a CSV string and trigger a download entirely in the
+// browser (Blob + object URL), no server round-trip.
+// ---------------------------------------------------------------------------
+
+export type CsvCell = string | number | boolean | null | undefined;
+
+const escapeCell = (value: CsvCell): string => {
+  if (value === null || value === undefined) return "";
+  const text = typeof value === "boolean" ? (value ? "Yes" : "No") : String(value);
+  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+};
+
+export function toCsv(headers: string[], rows: CsvCell[][]): string {
+  const lines = [headers, ...rows].map((r) => r.map(escapeCell).join(","));
+  // BOM so Excel opens UTF-8 (₹, names with accents) correctly.
+  return `\uFEFF${lines.join("\r\n")}\r\n`;
+}
+
+export function downloadCsv(filename: string, headers: string[], rows: CsvCell[][]) {
+  const blob = new Blob([toCsv(headers, rows)], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename.endsWith(".csv") ? filename : `${filename}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}

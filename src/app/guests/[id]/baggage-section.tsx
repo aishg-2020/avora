@@ -2,28 +2,12 @@
 
 import { useState, type FormEvent } from "react";
 
-import { Badge, Button, DataTable, Field, inputClassName, inlineInputClassName } from "@/components/ui";
-import { humanize } from "@/lib/format";
+import { BagStatusControl } from "@/components/bag-status-control";
+import { Button, DataTable, Field, inputClassName } from "@/components/ui";
+import { BAGGAGE_LABEL, BAGGAGE_STATUSES, nextBagTag } from "@/lib/baggage-helpers";
 import type { Baggage, BaggageStatus } from "@/lib/types";
 import { useAsyncData } from "@/lib/use-async-data";
 import { CURRENT_EVENT_ID, getServices } from "@/services";
-
-const STATUSES: BaggageStatus[] = ["at_airport", "in_transit", "in_room"];
-const tone: Record<BaggageStatus, "good" | "warn" | "neutral"> = {
-  in_room: "good",
-  in_transit: "warn",
-  at_airport: "warn",
-};
-
-// Suggests the next free printed tag ("AV-010") across the whole event so
-// staff don't have to look it up.
-function nextTag(allBags: Baggage[]): string {
-  const max = allBags.reduce((acc, b) => {
-    const m = b.tag.match(/^AV-(\d+)$/);
-    return m ? Math.max(acc, Number(m[1])) : acc;
-  }, 0);
-  return `AV-${String(max + 1).padStart(3, "0")}`;
-}
 
 export function BaggageSection({ guestId }: { guestId: string }) {
   const { data, loading, reload } = useAsyncData(() => {
@@ -70,29 +54,10 @@ export function BaggageSection({ guestId }: { guestId: string }) {
           empty="No bags tagged yet."
           columns={[
             { header: "Tag", cell: (b) => <span className="font-mono">{b.tag}</span> },
+            { header: "Description", cell: (b) => b.description ?? <span className="text-muted">—</span> },
+            { header: "Status", cell: (b) => <BagStatusControl bag={b} busy={busyId === b.id} onChange={(s) => setStatus(b, s)} /> },
             {
-              header: "Status",
-              cell: (b) => (
-                <div className="flex items-center gap-2">
-                  <Badge tone={tone[b.status]}>{humanize(b.status)}</Badge>
-                  <select
-                    aria-label={`Status for bag ${b.tag}`}
-                    className={`${inlineInputClassName} py-1`}
-                    value={b.status}
-                    disabled={busyId === b.id}
-                    onChange={(e) => setStatus(b, e.target.value as BaggageStatus)}
-                  >
-                    {STATUSES.map((s) => (
-                      <option key={s} value={s}>
-                        {humanize(s)}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              ),
-            },
-            {
-              header: "Actions",
+              header: "",
               cell: (b) => (
                 <Button variant="danger" onClick={() => remove(b)} disabled={busyId === b.id}>
                   Delete
@@ -103,7 +68,7 @@ export function BaggageSection({ guestId }: { guestId: string }) {
         />
       </div>
 
-      <AddBagForm key={allBags.length} guestId={guestId} suggestedTag={nextTag(allBags)} onAdded={reload} />
+      <AddBagForm key={allBags.length} guestId={guestId} suggestedTag={nextBagTag(allBags)} onAdded={reload} />
     </section>
   );
 }
@@ -118,7 +83,8 @@ function AddBagForm({
   onAdded: () => void;
 }) {
   const [tag, setTag] = useState(suggestedTag);
-  const [status, setStatus] = useState<BaggageStatus>("at_airport");
+  const [description, setDescription] = useState("");
+  const [status, setStatus] = useState<BaggageStatus>("checked_in");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -131,7 +97,7 @@ function AddBagForm({
     setSubmitting(true);
     setError(null);
     try {
-      await getServices().logistics.createBaggage({ guestId, tag, status });
+      await getServices().logistics.createBaggage({ guestId, tag, description, status });
       onAdded();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong.");
@@ -143,17 +109,22 @@ function AddBagForm({
     <form onSubmit={handleSubmit} className="rounded-xl border border-border p-5">
       <h3 className="mb-3 font-semibold">Add a bag</h3>
       <div className="flex flex-wrap items-end gap-3">
-        <div className="w-40">
+        <div className="w-36">
           <Field label="Tag">
             <input className={`${inputClassName} font-mono`} value={tag} onChange={(e) => setTag(e.target.value)} />
           </Field>
         </div>
-        <div className="w-44">
-          <Field label="Current status">
+        <div className="min-w-48 flex-1">
+          <Field label="Description">
+            <input className={inputClassName} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Black Samsonite, red ribbon" />
+          </Field>
+        </div>
+        <div className="w-40">
+          <Field label="Status">
             <select className={inputClassName} value={status} onChange={(e) => setStatus(e.target.value as BaggageStatus)}>
-              {STATUSES.map((s) => (
+              {BAGGAGE_STATUSES.map((s) => (
                 <option key={s} value={s}>
-                  {humanize(s)}
+                  {BAGGAGE_LABEL[s]}
                 </option>
               ))}
             </select>

@@ -4,6 +4,8 @@ import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
 
 import { Badge, Button, DataTable, MockBanner, PageHeader, inputClassName, inlineInputClassName } from "@/components/ui";
+import { downloadCsv } from "@/lib/csv";
+import { maskPhone } from "@/lib/format";
 import { RSVP_STATUSES, SIDES, overallRsvpStatus } from "@/lib/guest-helpers";
 import { useAsyncData } from "@/lib/use-async-data";
 import type { Guest, RsvpStatus, Side } from "@/lib/types";
@@ -22,14 +24,15 @@ const rsvpTone: Record<RsvpStatus, "good" | "warn" | "bad" | "neutral"> = {
 export default function GuestsPage() {
   const router = useRouter();
   const { data, loading, reload } = useAsyncData(() => {
-    const { guests } = getServices();
+    const { events, guests } = getServices();
     return Promise.all([
       guests.listParties(CURRENT_EVENT_ID),
       guests.listGuests(CURRENT_EVENT_ID),
       guests.listRsvps(CURRENT_EVENT_ID),
+      events.listFunctions(CURRENT_EVENT_ID),
     ]);
   }, []);
-  const [parties, guestList, rsvps] = data ?? [[], [], []];
+  const [parties, guestList, rsvps, functions] = data ?? [[], [], [], []];
   const partyById = useMemo(() => new Map(parties.map((p) => [p.id, p])), [parties]);
   const allTags = useMemo(
     () =>
@@ -66,6 +69,27 @@ export default function GuestsPage() {
       return true;
     });
   }, [guestList, partyById, rsvps, search, sideFilter, tagFilter, rsvpFilter]);
+
+  // Logistics sheet for the guests currently shown (filters apply): masked
+  // phone, family/side, and one RSVP column per function.
+  function exportLogisticsSheet() {
+    const headers = ["Guest name", "Family", "Side", "Phone (masked)", ...functions.map((f) => `RSVP: ${f.name}`)];
+    const rows = filtered.map((g) => {
+      const party = partyById.get(g.partyId);
+      return [
+        g.name,
+        party?.name ?? "",
+        party?.side ?? "",
+        maskPhone(g.phone),
+        ...functions.map((f) => {
+          const r = rsvps.find((x) => x.guestId === g.id && x.functionId === f.id);
+          if (!r) return "pending";
+          return r.headcount > 1 ? `${r.status} (${r.headcount})` : r.status;
+        }),
+      ];
+    });
+    downloadCsv("logistics-sheet", headers, rows);
+  }
 
   function openAddGuest() {
     setEditingGuest(undefined);
@@ -138,6 +162,9 @@ export default function GuestsPage() {
           </select>
         </div>
         <div className="flex gap-2">
+          <Button variant="secondary" onClick={exportLogisticsSheet} disabled={loading || filtered.length === 0}>
+            ⬇ Export
+          </Button>
           <Button variant="secondary" onClick={() => setImportOpen(true)}>
             Import CSV
           </Button>

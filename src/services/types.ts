@@ -8,6 +8,7 @@ import type {
   Campaign,
   CampaignAudience,
   CheckIn,
+  CheckInStage,
   Event,
   EventFunction,
   Guest,
@@ -16,6 +17,7 @@ import type {
   IdDocumentSide,
   Message,
   MessageTemplate,
+  Notification,
   Party,
   Room,
   Rsvp,
@@ -114,6 +116,7 @@ export interface CreateTravelInput {
   datetime: string;
   airport?: string;
   pickupNeeded: boolean;
+  pickupArranged?: boolean;
 }
 
 export type UpdateTravelInput = Partial<Omit<CreateTravelInput, "guestId">>;
@@ -121,11 +124,13 @@ export type UpdateTravelInput = Partial<Omit<CreateTravelInput, "guestId">>;
 export interface CreateBaggageInput {
   guestId: string;
   tag: string;
+  description?: string;
   status: BaggageStatus;
 }
 
 export interface UpdateBaggageInput {
   tag?: string;
+  description?: string;
   status?: BaggageStatus;
 }
 
@@ -203,6 +208,19 @@ export interface LogisticsService {
   createBaggage(input: CreateBaggageInput): Promise<Baggage>;
   updateBaggage(id: string, patch: UpdateBaggageInput): Promise<Baggage>;
   deleteBaggage(id: string): Promise<void>;
+
+  /** Moves the guest into the room (removing them from any other room first).
+   * Capacity is not enforced — the UI warns instead, since planners sometimes
+   * squeeze in an extra bed. */
+  assignGuestToRoom(roomId: string, guestId: string): Promise<Room>;
+  unassignGuest(guestId: string): Promise<void>;
+
+  /** One-tap arrival. Idempotent per guest × stage. Also appends the mock
+   * notifications that stage would trigger (hotel, driver, WhatsApp…). */
+  recordCheckIn(guestId: string, stage: CheckInStage): Promise<CheckIn>;
+  undoCheckIn(id: string): Promise<void>;
+  /** Mock outbound notification log, newest first. */
+  listNotifications(eventId: string): Promise<Notification[]>;
 }
 
 export interface CreateTemplateInput {
@@ -220,34 +238,25 @@ export interface CreateCampaignInput {
 
 export interface MessagingService {
   getConnection(): Promise<WhatsAppConnection>;
-
   listTemplates(): Promise<MessageTemplate[]>;
-  createTemplate(input: CreateTemplateInput): Promise<MessageTemplate>;
-
   listCampaigns(eventId: string): Promise<Campaign[]>;
-  getCampaign(id: string): Promise<Campaign | undefined>;
-  /** The concrete guests an audience currently resolves to. */
-  resolveAudience(eventId: string, audience: CampaignAudience): Promise<Guest[]>;
-  /** Creates a draft; recipients and cost are snapshotted from the audience. */
-  createCampaign(input: CreateCampaignInput): Promise<Campaign>;
-  /** Queues one message per recipient and starts (simulated) delivery.
-   * Status changes are pushed to `subscribe` listeners. */
-  sendCampaign(id: string): Promise<Campaign>;
-
-  listMessages(eventId: string): Promise<Message[]>;
-  listMessagesForCampaign(campaignId: string): Promise<Message[]>;
+  listCallLogs(eventId: string): Promise<CallLog[]>;
   /** Read-only delivery log of campaign messages sent to one guest. */
   listMessagesForGuest(guestId: string): Promise<Message[]>;
-
-  /** Fires whenever campaigns or messages change (e.g. delivery updates).
-   * Returns an unsubscribe function. Views re-fetch through the service
-   * rather than receiving state directly, so the mock can later be swapped
-   * for polling or a websocket without touching the UI. */
-  subscribe(listener: () => void): () => void;
-
-  listCallLogs(eventId: string): Promise<CallLog[]>;
-  getRatePerMessage(): Promise<number>;
   estimateCost(templateId: string, recipients: Guest[]): Promise<number>;
+
+  getCampaign(id: string): Promise<Campaign | undefined>;
+  /** Delivery log for one campaign, one row per recipient. */
+  listMessages(campaignId: string): Promise<Message[]>;
+  /** Resolves an audience to the concrete guests it would reach right now
+   * (used for live counts, cost preview and the review step). */
+  previewRecipients(eventId: string, audience: CampaignAudience): Promise<Guest[]>;
+
+  createTemplate(input: CreateTemplateInput): Promise<MessageTemplate>;
+  createCampaign(input: CreateCampaignInput): Promise<Campaign>;
+  /** Creates one queued message per recipient and starts the mock delivery
+   * simulation: queued → sent (1–2s) → delivered (3–5s) → read (8–12s). */
+  sendCampaign(id: string): Promise<Campaign>;
 }
 
 export interface SystemService {

@@ -111,7 +111,7 @@ export function GuestProfile() {
       {tab === "ids" && <IdDocumentsSection guestId={guest.id} />}
       {tab === "room" && <RoomSection guestId={guest.id} />}
       {tab === "baggage" && <BaggageSection guestId={guest.id} />}
-      {tab === "messages" && <MessagesSection guestId={guest.id} />}
+      {tab === "messages" && <MessagesSection guest={guest} />}
     </>
   );
 }

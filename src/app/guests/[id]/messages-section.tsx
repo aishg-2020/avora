@@ -1,12 +1,12 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
 import { Badge, Button, DataTable } from "@/components/ui";
-import { WhatsAppPreview } from "@/components/whatsapp-preview";
+import { WhatsAppSimulator } from "@/components/whatsapp-simulator";
 import { formatDateTime } from "@/lib/format";
-import type { MessageStatus } from "@/lib/types";
+import type { Guest, Message, MessageStatus, MessageTemplate } from "@/lib/types";
 import { useAsyncData } from "@/lib/use-async-data";
 import { CURRENT_EVENT_ID, getServices } from "@/services";
 
@@ -18,36 +18,41 @@ const tone: Record<MessageStatus, "good" | "warn" | "bad" | "neutral"> = {
   failed: "bad",
 };
 
-// Read-only: messages are created by campaigns, never from a profile.
-export function MessagesSection({ guestId }: { guestId: string }) {
-  const { data, loading, reload } = useAsyncData(() => {
+// Read-only log: messages are created by campaigns, never from a profile.
+// "Preview" opens the WhatsApp simulator for this guest + that campaign's
+// template, where the RSVP quick replies are live.
+export function MessagesSection({ guest }: { guest: Guest }) {
+  const { data, loading } = useAsyncData(() => {
     const { messaging } = getServices();
     return Promise.all([
-      messaging.listMessagesForGuest(guestId),
+      messaging.listMessagesForGuest(guest.id),
       messaging.listCampaigns(CURRENT_EVENT_ID),
       messaging.listTemplates(),
     ]);
-  }, [guestId]);
+  }, [guest.id]);
   const [messages, campaigns, templates] = data ?? [[], [], []];
   const campaignById = new Map(campaigns.map((c) => [c.id, c]));
   const templateById = new Map(templates.map((t) => [t.id, t]));
-  const [preview, setPreview] = useState<{ campaignId?: string } | null>(null);
 
-  // Delivery ticks keep moving while a campaign is being simulated.
-  useEffect(() => getServices().messaging.subscribe(reload), [reload]);
+  const [preview, setPreview] = useState<{ template: MessageTemplate; functionId?: string } | null>(null);
+
+  function openPreview(m: Message) {
+    const campaign = campaignById.get(m.campaignId);
+    const template = campaign && templateById.get(campaign.templateId);
+    if (!template) return;
+    setPreview({
+      template,
+      functionId: campaign?.audience?.kind === "function" ? campaign.audience.functionId : undefined,
+    });
+  }
 
   return (
     <section>
-      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+      <div className="mb-3 flex items-baseline justify-between">
         <h2 className="text-lg font-semibold">Messages</h2>
-        <div className="flex items-center gap-3">
-          <Link href="/campaigns" className="text-sm text-accent hover:underline">
-            Campaigns →
-          </Link>
-          <Button variant="secondary" onClick={() => setPreview({})}>
-            Preview as guest
-          </Button>
-        </div>
+        <Link href="/campaigns" className="text-sm text-accent hover:underline">
+          Campaigns →
+        </Link>
       </div>
       {loading && !data && <p className="text-muted">Loading…</p>}
       <DataTable
@@ -75,8 +80,8 @@ export function MessagesSection({ guestId }: { guestId: string }) {
           {
             header: "",
             cell: (m) => (
-              <Button variant="ghost" onClick={() => setPreview({ campaignId: m.campaignId })}>
-                Open in simulator
+              <Button variant="secondary" onClick={() => openPreview(m)}>
+                Preview
               </Button>
             ),
           },
@@ -84,7 +89,13 @@ export function MessagesSection({ guestId }: { guestId: string }) {
       />
 
       {preview && (
-        <WhatsAppPreview open onClose={() => setPreview(null)} guestId={guestId} campaignId={preview.campaignId} />
+        <WhatsAppSimulator
+          open
+          onClose={() => setPreview(null)}
+          guest={guest}
+          template={preview.template}
+          functionId={preview.functionId}
+        />
       )}
     </section>
   );

@@ -56,22 +56,44 @@ All still mock data, but the app *behaves* like the real thing.
 - **RSVP:** ✅ guest × function matrix — clicking a cell cycles pending → attending → declined → maybe;
   filters by family/side/tag; totals row per function (attending/declined/pending, + maybe when present).
   Same `upsertRsvp` service call as the profile tab, so both stay in sync.
-- **Campaigns:** ✅ wizard (pick or write a template with `{{guest_name}}` / `{{function_name}}` →
-  audience: all / function attendees / side / tag → review with ₹0.85-per-recipient estimate → confirm & send).
-  `/campaigns/[id]` shows per-recipient delivery; the mock sender (in `services/mock.ts`) moves messages
-  queued → sent (1-2s) → delivered (3-5s) → read (8-12s) and views refresh through `messaging.subscribe()`.
-  In-flight sends resume after a reload.
-- **Mock WhatsApp simulator:** ✅ `components/whatsapp-preview.tsx` — slide-out phone rendering the
-  guest's messages with placeholders filled, plus Attending / Can't make it / Maybe quick replies that call
-  `guests.upsertRsvp` and answer in the thread. Opens from campaign detail and the profile's Messages tab.
-- **Travel / IDs:** forms to add details; ID "upload" uses local image preview only
-- **Room Planner:** drag-and-drop guests into rooms, capacity warnings
-- **Check-In:** one-tap "Arrived at airport / hotel"; mock notification log ("hotel notified", "welcome message sent")
-- **Baggage:** add bags, change status
-- **Exports:** rooming list, transport manifest, logistics sheet as CSV
-- **Dashboard:** RSVP funnel, pending IDs, arrivals today, mock message spend
+- **Campaigns:** ✅ 3-step create flow (template — pick or write a new one with `{{guest_name}}` /
+  `{{function_name}}` placeholders → audience: all / function attendees / side / tag → review with
+  recipient list and ₹0.85-per-recipient cost → confirm & send). The mock sender queues one message per
+  recipient and advances it sent (1–2s) → delivered (3–5s) → read (8–12s); the detail view polls the
+  service so statuses update live, and interrupted sends are fast-forwarded on the next read.
+- **Mock WhatsApp simulator:** ✅ "Preview as guest" slide-over (`src/components/whatsapp-simulator.tsx`)
+  with a fake phone screen, placeholders rendered for that guest, and RSVP quick replies that call
+  `guests.upsertRsvp` (targeted function, or every function for broad campaigns) and answer back in the
+  thread. Reachable from the campaign detail view and the guest profile's Messages tab.
+- **Travel / IDs:** ✅ Travel Planner lists every leg with add/edit/delete (shared
+  `components/travel-form-modal.tsx`, with a guest picker on the planner), filters by date / direction /
+  pickup state, and a "Mark arranged" toggle (`Travel.pickupArranged`). ID Documents lists every guest
+  with Verified / Review / Missing / Expired status (`lib/guest-helpers.ts#idStatus`), add/edit via the
+  shared `components/id-document-form-modal.tsx` (number masked by the service, expiry, verified flag),
+  filters by status, and photo "upload" that is a browser-memory preview only (`components/image-slot.tsx`).
+- **Room Planner:** ✅ room cards with occupancy badges, native HTML5 drag-and-drop (unassigned → room,
+  room → room, room → unassigned) plus a select-and-assign fallback, remove buttons, at-capacity and
+  over-capacity warnings (capacity is not enforced — planners sometimes add a bed), and a separate
+  Unassigned panel. Mutations: `logistics.assignGuestToRoom` / `unassignGuest`.
+- **Check-In:** ✅ three stages in order (airport → hotel → venue), one-tap "Mark arrived" per guest ×
+  stage (with undo), pending-per-stage cards that filter the list, and a mock notification log
+  (`Notification` entity) showing what each arrival would have sent — hotel, driver, baggage team,
+  WhatsApp to the masked number. `logistics.recordCheckIn` / `undoCheckIn` / `listNotifications`.
+- **Baggage:** ✅ every bag with owner, tag, description and status (Checked In → On Belt → Collected),
+  one-tap segmented status control (`components/bag-status-control.tsx`), add form with owner/tag/
+  description, search + status filter. Same control in the profile's Baggage tab.
+- **Exports:** ✅ in-browser CSV downloads (`lib/csv.ts#downloadCsv`, Blob + object URL, no server):
+  `/rooms` rooming list (room, hotel, guest, family, bed type, notes), `/travel` transport manifest
+  (respects the active filters; guest, direction, mode, number, IST time, airport, pickup required/
+  arranged), `/guests` logistics sheet (guest, family, side, masked phone, RSVP per function).
+- **Dashboard:** ✅ live from the store — RSVP funnel (attending / declined / pending / no response per
+  guest), pending IDs (missing + needs review + expired), arrivals today in IST (with the next arrival
+  when there are none), checked-in count, and mock message spend (messages sent × ₹0.85).
 
 **Exit criteria:** a 10-minute client demo on an iPad, covering import → invite → RSVP → travel → room → check-in → export, all on mocks.
+
+**Status:** every Phase 1 item above is built. `npm run build` passes (fonts moved to a system stack so
+the build has no network dependency).
 
 ## Phase 2: Real backend (no WhatsApp yet)
 - Database (Postgres, e.g. Supabase) behind the same service interfaces

@@ -5,29 +5,29 @@
 // This is the ONLY module allowed to read/write the data store directly.
 // UI code must always go through `getServices()`.
 
-import { maskIdNumber } from "@/lib/format";
+import { maskIdNumber, maskPhone } from "@/lib/format";
+import { COST_PER_RECIPIENT_INR } from "@/lib/pricing";
 import { dataStoreReady, genId, useDataStore, type DataState } from "@/store/data-store";
 import type {
   Baggage,
   Campaign,
   CampaignAudience,
+  CheckIn,
+  CheckInStage,
   EventFunction,
   Guest,
   IdDocument,
   Message,
   MessageStatus,
   MessageTemplate,
+  Notification,
   Party,
+  Room,
   Rsvp,
   Travel,
 } from "@/lib/types";
 import type { Services } from "./types";
 
-// Flat illustrative rate (INR) for the cost preview. Real rates come from
-// the provider in a later phase.
-const PER_MESSAGE_RATE = 0.85;
-
-const round2 = (n: number) => Math.round(n * 100) / 100;
 
 // Every mutating/reading method awaits this first so we never race the
 // async rehydration of localStorage on first load.
@@ -44,7 +44,16 @@ const normalizeTags = (tags: string[]): string[] =>
 
 // Applies `update` to the one record in `collection` whose id matches and
 // writes the new array back to the store. Throws if nothing matched.
-type IdCollection = "functions" | "parties" | "guests" | "travel" | "idDocuments" | "baggage";
+type IdCollection =
+  | "functions"
+  | "parties"
+  | "guests"
+  | "travel"
+  | "idDocuments"
+  | "baggage"
+  | "campaigns"
+  | "messages"
+  | "checkIns";
 type Item<K extends IdCollection> = DataState[K][number];
 
 function updateById<K extends IdCollection>(collection: K, id: string, update: (current: Item<K>) => Item<K>): Item<K> {
@@ -60,12 +69,22 @@ function updateById<K extends IdCollection>(collection: K, id: string, update: (
   return updated;
 }
 
-function resolveAudienceSync(eventId: string, audience: CampaignAudience): Guest[] {
-  const { parties, guests, rsvps } = useDataStore.getState();
-  const partyById = new Map(parties.filter((p) => p.eventId === eventId).map((p) => [p.id, p]));
-  const eventGuests = guests.filter((g) => partyById.has(g.partyId));
+// ---------------------------------------------------------------------------
+// Campaign delivery simulation.
+// ---------------------------------------------------------------------------
 
-  switch (audience.type) {
+const MESSAGE_RANK: Record<MessageStatus, number> = { queued: 0, sent: 1, delivered: 2, read: 3, failed: 3 };
+
+const randomBetween = (minMs: number, maxMs: number) => minMs + Math.random() * (maxMs - minMs);
+
+// Resolves an audience into concrete guests, reading current store state.
+function resolveAudience(eventId: string, audience: CampaignAudience): Guest[] {
+  const { parties, guests, rsvps } = useDataStore.getState();
+  const partyIds = new Set(parties.filter((p) => p.eventId === eventId).map((p) => p.id));
+  const eventGuests = guests.filter((g) => partyIds.has(g.partyId));
+  const partyById = new Map(parties.map((p) => [p.id, p]));
+
+  switch (audience.kind) {
     case "all":
       return eventGuests;
     case "function": {
@@ -85,89 +104,136 @@ function resolveAudienceSync(eventId: string, audience: CampaignAudience): Guest
 }
 
 function audienceLabel(audience: CampaignAudience): string {
-  switch (audience.type) {
+  switch (audience.kind) {
     case "all":
       return "All guests";
     case "function": {
       const fn = useDataStore.getState().functions.find((f) => f.id === audience.functionId);
-      return `Attending ${fn?.name ?? "function"}`;
+      return `Attending: ${fn?.name ?? audience.functionId}`;
     }
     case "side":
-      return `${audience.side[0].toUpperCase()}${audience.side.slice(1)} side`;
+      return `Side: ${audience.side}`;
     case "tag":
       return `Tag: ${audience.tag}`;
   }
 }
 
-// ---------------------------------------------------------------------------
-// Delivery simulation. Timings (from send): sent after 1-2s, delivered after
-// 3-5s, read after 8-12s. Each hop writes to the store, which notifies
-// `messaging.subscribe` listeners. Pending hops are re-scheduled after a
-// page reload so nothing gets stuck at "queued".
-// ---------------------------------------------------------------------------
-const NEXT_HOP: Partial<Record<MessageStatus, { status: MessageStatus; minMs: number; maxMs: number }>> = {
-  queued: { status: "sent", minMs: 1000, maxMs: 2000 },
-  sent: { status: "delivered", minMs: 2000, maxMs: 3000 }, // cumulative 3-5s
-  delivered: { status: "read", minMs: 5000, maxMs: 7000 }, // cumulative 8-12s
-};
-const randomBetween = (min: number, max: number) => min + Math.random() * (max - min);
-const scheduled = new Set<string>();
-
-function setMessageStatus(id: string, status: MessageStatus) {
-  const now = new Date().toISOString();
+// Upgrades one message's status (never downgrades), then marks the campaign
+// "sent" once every recipient has at least left the queue.
+function bumpMessage(messageId: string, status: MessageStatus) {
+  let campaignId: string | undefined;
   useDataStore.setState((s) => ({
-    messages: s.messages.map((m) =>
-      m.id === id
-        ? {
-            ...m,
-            status,
-            ...(status === "delivered" ? { deliveredAt: now } : {}),
-            ...(status === "read" ? { readAt: now } : {}),
-          }
-        : m,
-    ),
+    messages: s.messages.map((m) => {
+      if (m.id !== messageId || MESSAGE_RANK[m.status] >= MESSAGE_RANK[status]) return m;
+      campaignId = m.campaignId;
+      return { ...m, status };
+    }),
   }));
+  if (campaignId) maybeCompleteCampaign(campaignId);
 }
 
-// A campaign counts as "sent" once every message has left the queue.
-function settleCampaignStatus(campaignId: string) {
-  const { messages, campaigns } = useDataStore.getState();
+function maybeCompleteCampaign(campaignId: string) {
+  const { campaigns, messages } = useDataStore.getState();
+  const campaign = campaigns.find((c) => c.id === campaignId);
+  if (!campaign || campaign.status !== "sending") return;
   const mine = messages.filter((m) => m.campaignId === campaignId);
-  if (mine.length === 0 || mine.some((m) => m.status === "queued")) return;
-  if (campaigns.find((c) => c.id === campaignId)?.status === "sent") return;
-  useDataStore.setState((s) => ({
-    campaigns: s.campaigns.map((c) => (c.id === campaignId ? { ...c, status: "sent" } : c)),
-  }));
-}
-
-function scheduleHop(messageId: string) {
-  if (typeof window === "undefined" || scheduled.has(messageId)) return;
-  const message = useDataStore.getState().messages.find((m) => m.id === messageId);
-  const hop = message && NEXT_HOP[message.status];
-  if (!hop) return;
-  scheduled.add(messageId);
-  window.setTimeout(() => {
-    scheduled.delete(messageId);
-    const current = useDataStore.getState().messages.find((m) => m.id === messageId);
-    if (!current || current.status !== message.status) return; // reset or changed meanwhile
-    setMessageStatus(messageId, hop.status);
-    if (hop.status === "sent") settleCampaignStatus(current.campaignId);
-    scheduleHop(messageId);
-  }, randomBetween(hop.minMs, hop.maxMs));
-}
-
-// Anything still mid-flight from a recent send gets its remaining hops
-// re-scheduled. Older non-final messages (e.g. seed data that was only
-// "delivered") are historical and left alone.
-const RESUME_WINDOW_MS = 60_000;
-function resumeDeliveries() {
-  const cutoff = Date.now() - RESUME_WINDOW_MS;
-  for (const m of useDataStore.getState().messages) {
-    if (NEXT_HOP[m.status] && new Date(m.sentAt).getTime() > cutoff) scheduleHop(m.id);
+  if (mine.length > 0 && mine.every((m) => MESSAGE_RANK[m.status] >= MESSAGE_RANK.sent)) {
+    useDataStore.setState((s) => ({
+      campaigns: s.campaigns.map((c) => (c.id === campaignId ? { ...c, status: "sent" as const } : c)),
+    }));
   }
 }
-if (typeof window !== "undefined") {
-  dataStoreReady.then(resumeDeliveries);
+
+// Timed status progression per the spec: queued → sent after 1–2s,
+// delivered after 3–5s, read after 8–12s.
+function scheduleDelivery(messageId: string) {
+  setTimeout(() => bumpMessage(messageId, "sent"), randomBetween(1000, 2000));
+  setTimeout(() => bumpMessage(messageId, "delivered"), randomBetween(3000, 5000));
+  setTimeout(() => bumpMessage(messageId, "read"), randomBetween(8000, 12000));
+}
+
+// If the page was closed mid-simulation the timers die with it, leaving
+// messages stuck. On the next read, fast-forward anything whose schedule
+// clearly elapsed. "queued" is never a legitimate historical state, so it
+// always advances; "sent"/"delivered" only advance within a minute of
+// sending so old seed data (mixed sent/delivered/read) keeps its variety.
+function catchUpDelivery(campaignId: string) {
+  const now = Date.now();
+  const stale = useDataStore
+    .getState()
+    .messages.filter((m) => m.campaignId === campaignId && m.status !== "read" && m.status !== "failed")
+    .map((m) => ({ m, elapsed: now - new Date(m.sentAt).getTime() }))
+    .filter(({ m, elapsed }) => elapsed > 2000 && (m.status === "queued" || elapsed < 60_000));
+  for (const { m, elapsed } of stale) {
+    const expected: MessageStatus = elapsed > 12_000 ? "read" : elapsed > 5000 ? "delivered" : "sent";
+    bumpMessage(m.id, expected);
+  }
+}
+
+// Catch-up for campaigns that may have been interrupted, so list/detail
+// reads always see a consistent status.
+function catchUpCampaigns(campaigns: Campaign[]) {
+  for (const c of campaigns) {
+    if (c.status !== "sending") continue;
+    catchUpDelivery(c.id);
+    maybeCompleteCampaign(c.id);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Check-in notifications: what each arrival stage *would* send.
+// ---------------------------------------------------------------------------
+
+function mockNotificationsFor(guestId: string, stage: CheckInStage, at: string): Notification[] {
+  const { guests, rooms, travel, baggage } = useDataStore.getState();
+  const guest = guests.find((g) => g.id === guestId);
+  if (!guest) return [];
+  const room = rooms.find((r) => r.guestIds.includes(guestId));
+  const phone = maskPhone(guest.phone);
+  const bags = baggage.filter((b) => b.guestId === guestId).length;
+  const arrival = travel.find((t) => t.guestId === guestId && t.direction === "arrival");
+
+  const out: Omit<Notification, "id" | "at">[] = [];
+  switch (stage) {
+    case "airport":
+      out.push({
+        guestId,
+        stage,
+        kind: "hotel",
+        text: room
+          ? `Hotel notified: ${guest.name} has landed — room ${room.roomNo} at ${room.hotel} to be readied.`
+          : `Hotel notified: ${guest.name} has landed (no room assigned yet).`,
+      });
+      if (arrival?.pickupNeeded) {
+        out.push({
+          guestId,
+          stage,
+          kind: "driver",
+          text: `Driver messaged to meet ${guest.name} at ${arrival.airport ?? "arrivals"}${arrival.pickupArranged ? "" : " (pickup not yet arranged!)"}.`,
+        });
+      }
+      out.push({ guestId, stage, kind: "whatsapp", text: `Welcome message sent to ${phone}.` });
+      break;
+    case "hotel":
+      out.push({
+        guestId,
+        stage,
+        kind: "whatsapp",
+        text: room
+          ? `Room details sent to ${phone}: room ${room.roomNo}, ${room.hotel}.`
+          : `Check-in confirmation sent to ${phone} (room still to be allocated).`,
+      });
+      if (bags > 0) {
+        out.push({ guestId, stage, kind: "baggage", text: `Baggage team notified: ${bags} bag${bags === 1 ? "" : "s"} for ${guest.name} to go up to ${room ? `room ${room.roomNo}` : "the lobby"}.` });
+      }
+      break;
+    case "venue":
+      out.push({ guestId, stage, kind: "host", text: `Hosts notified: ${guest.name} has arrived at the venue.` });
+      out.push({ guestId, stage, kind: "whatsapp", text: `Schedule for the evening sent to ${phone}.` });
+      break;
+  }
+  // Stagger timestamps by a second so the log reads in send order.
+  return out.map((n, i) => ({ ...n, id: genId("ntf"), at: new Date(new Date(at).getTime() + (i + 1) * 1000).toISOString() }));
 }
 
 export const mockServices: Services = {
@@ -361,6 +427,7 @@ export const mockServices: Services = {
           checkIns: s.checkIns.filter((c) => !guestIds.has(c.guestId)),
           callLogs: s.callLogs.filter((c) => !guestIds.has(c.guestId)),
           messages: s.messages.filter((m) => !guestIds.has(m.guestId)),
+          notifications: s.notifications.filter((n) => !guestIds.has(n.guestId)),
           rooms: s.rooms.map((r) => ({ ...r, guestIds: r.guestIds.filter((gid) => !guestIds.has(gid)) })),
         };
       });
@@ -412,6 +479,7 @@ export const mockServices: Services = {
         checkIns: s.checkIns.filter((c) => c.guestId !== id),
         callLogs: s.callLogs.filter((c) => c.guestId !== id),
         messages: s.messages.filter((m) => m.guestId !== id),
+        notifications: s.notifications.filter((n) => n.guestId !== id),
         rooms: s.rooms.map((r) => ({ ...r, guestIds: r.guestIds.filter((gid) => gid !== id) })),
       }));
     },
@@ -516,6 +584,7 @@ export const mockServices: Services = {
         datetime: input.datetime,
         ...(input.airport?.trim() ? { airport: input.airport.trim() } : {}),
         pickupNeeded: input.pickupNeeded,
+        ...(input.pickupNeeded && input.pickupArranged ? { pickupArranged: true } : {}),
       };
       useDataStore.setState((s) => ({ travel: [...s.travel, travel] }));
       return travel;
@@ -530,11 +599,14 @@ export const mockServices: Services = {
           ...(patch.number !== undefined ? { number: patch.number.trim() } : {}),
           ...(patch.datetime !== undefined ? { datetime: patch.datetime } : {}),
           ...(patch.pickupNeeded !== undefined ? { pickupNeeded: patch.pickupNeeded } : {}),
+          ...(patch.pickupArranged !== undefined ? { pickupArranged: patch.pickupArranged } : {}),
         };
         if (patch.airport !== undefined) {
           if (patch.airport.trim()) next.airport = patch.airport.trim();
           else delete next.airport;
         }
+        // "Arranged" only makes sense while a pickup is needed.
+        if (!next.pickupNeeded) delete next.pickupArranged;
         return next;
       });
     },
@@ -547,21 +619,92 @@ export const mockServices: Services = {
       await ready();
       const tag = input.tag.trim();
       if (!tag) throw new Error("A bag needs a tag.");
-      const bag: Baggage = { id: genId("bag"), guestId: input.guestId, tag, status: input.status };
+      const bag: Baggage = {
+        id: genId("bag"),
+        guestId: input.guestId,
+        tag,
+        ...(input.description?.trim() ? { description: input.description.trim() } : {}),
+        status: input.status,
+      };
       useDataStore.setState((s) => ({ baggage: [...s.baggage, bag] }));
       return bag;
     },
     async updateBaggage(id, patch) {
       await ready();
-      return updateById("baggage", id, (b) => ({
-        ...b,
-        ...(patch.tag !== undefined ? { tag: patch.tag.trim() } : {}),
-        ...(patch.status !== undefined ? { status: patch.status } : {}),
-      }));
+      return updateById("baggage", id, (b) => {
+        const next: Baggage = {
+          ...b,
+          ...(patch.tag !== undefined ? { tag: patch.tag.trim() } : {}),
+          ...(patch.status !== undefined ? { status: patch.status } : {}),
+        };
+        if (patch.description !== undefined) {
+          if (patch.description.trim()) next.description = patch.description.trim();
+          else delete next.description;
+        }
+        return next;
+      });
     },
     async deleteBaggage(id) {
       await ready();
       useDataStore.setState((s) => ({ baggage: s.baggage.filter((b) => b.id !== id) }));
+    },
+
+    async assignGuestToRoom(roomId, guestId) {
+      await ready();
+      const { rooms, guests } = useDataStore.getState();
+      if (!rooms.some((r) => r.id === roomId)) throw new Error(`Room ${roomId} not found`);
+      if (!guests.some((g) => g.id === guestId)) throw new Error(`Guest ${guestId} not found`);
+      let updated: Room | undefined;
+      useDataStore.setState((s) => ({
+        rooms: s.rooms.map((r) => {
+          const without = r.guestIds.filter((id) => id !== guestId);
+          if (r.id !== roomId) return without.length === r.guestIds.length ? r : { ...r, guestIds: without };
+          updated = { ...r, guestIds: [...without, guestId] };
+          return updated;
+        }),
+      }));
+      return updated!;
+    },
+
+    async unassignGuest(guestId) {
+      await ready();
+      useDataStore.setState((s) => ({
+        rooms: s.rooms.map((r) =>
+          r.guestIds.includes(guestId) ? { ...r, guestIds: r.guestIds.filter((id) => id !== guestId) } : r,
+        ),
+      }));
+    },
+
+    async recordCheckIn(guestId, stage) {
+      await ready();
+      const state = useDataStore.getState();
+      const existing = state.checkIns.find((c) => c.guestId === guestId && c.stage === stage);
+      if (existing) return existing;
+      const guest = state.guests.find((g) => g.id === guestId);
+      if (!guest) throw new Error(`Guest ${guestId} not found`);
+
+      const at = new Date().toISOString();
+      const checkIn: CheckIn = { id: genId("ci"), guestId, stage, at, by: "Staff: You" };
+      const notifications = mockNotificationsFor(guest.id, stage, at);
+      useDataStore.setState((s) => ({
+        checkIns: [...s.checkIns, checkIn],
+        notifications: [...s.notifications, ...notifications],
+      }));
+      return checkIn;
+    },
+
+    async undoCheckIn(id) {
+      await ready();
+      useDataStore.setState((s) => ({ checkIns: s.checkIns.filter((c) => c.id !== id) }));
+    },
+
+    async listNotifications(eventId) {
+      await ready();
+      const ids = guestIdsForEvent(eventId);
+      return useDataStore
+        .getState()
+        .notifications.filter((n) => ids.has(n.guestId))
+        .sort((a, b) => b.at.localeCompare(a.at));
     },
   },
 
@@ -570,125 +713,121 @@ export const mockServices: Services = {
       await ready();
       return useDataStore.getState().whatsapp;
     },
-
     async listTemplates() {
       await ready();
       return useDataStore.getState().templates;
     },
-    async createTemplate(input) {
-      await ready();
-      const name = input.name.trim();
-      const body = input.body.trim();
-      if (!name || !body) throw new Error("Template needs a name and a body.");
-      const template: MessageTemplate = { id: genId("tpl"), name, category: input.category, body };
-      useDataStore.setState((s) => ({ templates: [...s.templates, template] }));
-      return template;
-    },
-
     async listCampaigns(eventId) {
       await ready();
-      return useDataStore
-        .getState()
-        .campaigns.filter((c) => c.eventId === eventId)
-        .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+      catchUpCampaigns(useDataStore.getState().campaigns.filter((c) => c.eventId === eventId));
+      return useDataStore.getState().campaigns.filter((c) => c.eventId === eventId);
     },
-    async getCampaign(id) {
-      await ready();
-      return useDataStore.getState().campaigns.find((c) => c.id === id);
-    },
-    async resolveAudience(eventId, audience) {
-      await ready();
-      return resolveAudienceSync(eventId, audience);
-    },
-    async createCampaign(input) {
-      await ready();
-      if (!useDataStore.getState().templates.some((t) => t.id === input.templateId)) {
-        throw new Error("Pick a template first.");
-      }
-      const recipients = resolveAudienceSync(input.eventId, input.audience);
-      const campaign: Campaign = {
-        id: genId("cmp"),
-        eventId: input.eventId,
-        name: input.name.trim() || "Untitled campaign",
-        templateId: input.templateId,
-        audience: input.audience,
-        segment: audienceLabel(input.audience),
-        recipients: recipients.length,
-        status: "draft",
-        estimatedCost: round2(recipients.length * PER_MESSAGE_RATE),
-        createdAt: new Date().toISOString(),
-      };
-      useDataStore.setState((s) => ({ campaigns: [...s.campaigns, campaign] }));
-      return campaign;
-    },
-    async sendCampaign(id) {
-      await ready();
-      const campaign = useDataStore.getState().campaigns.find((c) => c.id === id);
-      if (!campaign) throw new Error(`Campaign ${id} not found`);
-      if (campaign.status === "sending" || campaign.status === "sent") return campaign;
-
-      // Re-resolve at send time so late RSVP changes are honoured.
-      const recipients = resolveAudienceSync(campaign.eventId, campaign.audience);
-      if (recipients.length === 0) throw new Error("This audience has no guests right now.");
-      const now = new Date().toISOString();
-      const queued: Message[] = recipients.map((g) => ({
-        id: genId("msg"),
-        campaignId: id,
-        guestId: g.id,
-        status: "queued",
-        sentAt: now,
-      }));
-      const updated: Campaign = {
-        ...campaign,
-        status: "sending",
-        sentAt: now,
-        recipients: recipients.length,
-        estimatedCost: round2(recipients.length * PER_MESSAGE_RATE),
-      };
-      useDataStore.setState((s) => ({
-        campaigns: s.campaigns.map((c) => (c.id === id ? updated : c)),
-        messages: [...s.messages, ...queued],
-      }));
-      queued.forEach((m) => scheduleHop(m.id));
-      return updated;
-    },
-
-    async listMessages(eventId) {
-      await ready();
-      const { campaigns, messages } = useDataStore.getState();
-      const ids = new Set(campaigns.filter((c) => c.eventId === eventId).map((c) => c.id));
-      return messages.filter((m) => ids.has(m.campaignId));
-    },
-    async listMessagesForCampaign(campaignId) {
-      await ready();
-      return useDataStore.getState().messages.filter((m) => m.campaignId === campaignId);
-    },
-    async listMessagesForGuest(guestId) {
-      await ready();
-      return useDataStore
-        .getState()
-        .messages.filter((m) => m.guestId === guestId)
-        .sort((a, b) => b.sentAt.localeCompare(a.sentAt));
-    },
-
-    subscribe(listener) {
-      return useDataStore.subscribe((state, prev) => {
-        if (state.messages !== prev.messages || state.campaigns !== prev.campaigns) listener();
-      });
-    },
-
     async listCallLogs(eventId) {
       await ready();
       const ids = guestIdsForEvent(eventId);
       return useDataStore.getState().callLogs.filter((c) => ids.has(c.guestId));
     },
-    async getRatePerMessage() {
-      return PER_MESSAGE_RATE;
-    },
-    async estimateCost(templateId, recipients) {
+    async listMessagesForGuest(guestId) {
       await ready();
-      if (!useDataStore.getState().templates.some((t) => t.id === templateId)) return 0;
-      return round2(recipients.length * PER_MESSAGE_RATE);
+      const campaignIds = new Set(
+        useDataStore.getState().messages.filter((m) => m.guestId === guestId).map((m) => m.campaignId),
+      );
+      for (const id of campaignIds) catchUpDelivery(id);
+      return useDataStore
+        .getState()
+        .messages.filter((m) => m.guestId === guestId)
+        .sort((a, b) => b.sentAt.localeCompare(a.sentAt));
+    },
+    async estimateCost(_templateId, recipients) {
+      await ready();
+      return recipients.length * COST_PER_RECIPIENT_INR;
+    },
+
+    async getCampaign(id) {
+      await ready();
+      const current = useDataStore.getState().campaigns.find((c) => c.id === id);
+      if (current) catchUpCampaigns([current]);
+      return useDataStore.getState().campaigns.find((c) => c.id === id);
+    },
+
+    async listMessages(campaignId) {
+      await ready();
+      catchUpDelivery(campaignId);
+      return useDataStore
+        .getState()
+        .messages.filter((m) => m.campaignId === campaignId)
+        .sort((a, b) => a.sentAt.localeCompare(b.sentAt));
+    },
+
+    async previewRecipients(eventId, audience) {
+      await ready();
+      return resolveAudience(eventId, audience);
+    },
+
+    async createTemplate(input) {
+      await ready();
+      const name = input.name.trim();
+      const body = input.body.trim();
+      if (!name || !body) throw new Error("A template needs a name and a body.");
+      const template: MessageTemplate = { id: genId("tpl"), name, category: input.category, body };
+      useDataStore.setState((s) => ({ templates: [...s.templates, template] }));
+      return template;
+    },
+
+    async createCampaign(input) {
+      await ready();
+      const recipients = resolveAudience(input.eventId, input.audience);
+      const campaign: Campaign = {
+        id: genId("cmp"),
+        eventId: input.eventId,
+        name: input.name.trim() || "Untitled campaign",
+        templateId: input.templateId,
+        segment: audienceLabel(input.audience),
+        audience: input.audience,
+        recipients: recipients.length,
+        status: "draft",
+        estimatedCost: recipients.length * COST_PER_RECIPIENT_INR,
+      };
+      useDataStore.setState((s) => ({ campaigns: [...s.campaigns, campaign] }));
+      return campaign;
+    },
+
+    async sendCampaign(id) {
+      await ready();
+      const campaign = useDataStore.getState().campaigns.find((c) => c.id === id);
+      if (!campaign) throw new Error(`Campaign ${id} not found`);
+      if (!campaign.audience) throw new Error("This campaign has no structured audience to send to.");
+      if (campaign.status === "sending" || campaign.status === "sent") return campaign;
+
+      const recipients = resolveAudience(campaign.eventId, campaign.audience);
+      if (recipients.length === 0) throw new Error("No recipients match this audience.");
+
+      const sentAt = new Date().toISOString();
+      const outgoing: Message[] = recipients.map((g) => ({
+        id: genId("msg"),
+        campaignId: campaign.id,
+        guestId: g.id,
+        status: "queued",
+        sentAt,
+      }));
+
+      let updated: Campaign | undefined;
+      useDataStore.setState((s) => ({
+        messages: [...s.messages, ...outgoing],
+        campaigns: s.campaigns.map((c) => {
+          if (c.id !== id) return c;
+          updated = {
+            ...c,
+            status: "sending" as const,
+            sentAt,
+            recipients: recipients.length,
+            estimatedCost: recipients.length * COST_PER_RECIPIENT_INR,
+          };
+          return updated;
+        }),
+      }));
+      for (const m of outgoing) scheduleDelivery(m.id);
+      return updated!;
     },
   },
 

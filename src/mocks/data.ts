@@ -11,6 +11,7 @@ import type {
   IdDocument,
   Message,
   MessageTemplate,
+  Notification,
   Party,
   Room,
   Rsvp,
@@ -66,7 +67,7 @@ export const rsvps: Rsvp[] = [
 ];
 
 export const travel: Travel[] = [
-  { id: "tr_1", guestId: "g_1", direction: "arrival", mode: "flight", number: "6E 204", datetime: "2026-12-11T14:30:00+05:30", airport: "Jaipur (JAI)", pickupNeeded: true },
+  { id: "tr_1", guestId: "g_1", direction: "arrival", mode: "flight", number: "6E 204", datetime: "2026-12-11T14:30:00+05:30", airport: "Jaipur (JAI)", pickupNeeded: true, pickupArranged: true },
   { id: "tr_2", guestId: "g_3", direction: "arrival", mode: "train", number: "12956", datetime: "2026-12-11T09:15:00+05:30", airport: "Jaipur Junction", pickupNeeded: true },
   { id: "tr_3", guestId: "g_5", direction: "arrival", mode: "flight", number: "AI 112", datetime: "2026-12-11T23:50:00+05:30", airport: "Jaipur (JAI)", pickupNeeded: true },
   { id: "tr_4", guestId: "g_8", direction: "arrival", mode: "flight", number: "EK 572", datetime: "2026-12-12T03:40:00+05:30", airport: "Jaipur (JAI)", pickupNeeded: false },
@@ -87,15 +88,15 @@ export const rooms: Room[] = [
 ];
 
 export const baggage: Baggage[] = [
-  { id: "bag_1", guestId: "g_1", tag: "AV-001", status: "in_room" },
-  { id: "bag_2", guestId: "g_1", tag: "AV-002", status: "in_room" },
-  { id: "bag_3", guestId: "g_1", tag: "AV-003", status: "in_room" },
-  { id: "bag_4", guestId: "g_3", tag: "AV-004", status: "in_transit" },
-  { id: "bag_5", guestId: "g_3", tag: "AV-005", status: "in_transit" },
-  { id: "bag_6", guestId: "g_5", tag: "AV-006", status: "at_airport" },
-  { id: "bag_7", guestId: "g_5", tag: "AV-007", status: "at_airport" },
-  { id: "bag_8", guestId: "g_5", tag: "AV-008", status: "at_airport" },
-  { id: "bag_9", guestId: "g_5", tag: "AV-009", status: "at_airport" },
+  { id: "bag_1", guestId: "g_1", tag: "AV-001", description: "Black Samsonite, large", status: "collected" },
+  { id: "bag_2", guestId: "g_1", tag: "AV-002", description: "Navy duffel", status: "collected" },
+  { id: "bag_3", guestId: "g_1", tag: "AV-003", description: "Garment bag (sherwani)", status: "collected" },
+  { id: "bag_4", guestId: "g_3", tag: "AV-004", description: "Grey trolley", status: "on_belt" },
+  { id: "bag_5", guestId: "g_3", tag: "AV-005", status: "on_belt" },
+  { id: "bag_6", guestId: "g_5", tag: "AV-006", description: "Red hard-shell", status: "checked_in" },
+  { id: "bag_7", guestId: "g_5", tag: "AV-007", status: "checked_in" },
+  { id: "bag_8", guestId: "g_5", tag: "AV-008", status: "checked_in" },
+  { id: "bag_9", guestId: "g_5", tag: "AV-009", description: "Gift box — fragile", status: "checked_in" },
 ];
 
 export const checkIns: CheckIn[] = [
@@ -104,29 +105,38 @@ export const checkIns: CheckIn[] = [
   { id: "ci_3", guestId: "g_3", stage: "airport", at: "2026-12-11T09:30:00+05:30", by: "Staff: Arjun" },
 ];
 
-// Placeholders: {{guest_name}}, {{function_name}}, {{event_name}}.
+// What the seed check-ins would have triggered.
+export const notifications: Notification[] = [
+  { id: "ntf_1", guestId: "g_1", stage: "airport", kind: "hotel", text: "Hotel notified: Rajesh Sharma has landed — room 101 at Rambagh Palace to be readied.", at: "2026-12-11T14:45:05+05:30" },
+  { id: "ntf_2", guestId: "g_1", stage: "airport", kind: "whatsapp", text: "Welcome message sent to +91 XXXXX X1111.", at: "2026-12-11T14:45:06+05:30" },
+  { id: "ntf_3", guestId: "g_1", stage: "hotel", kind: "whatsapp", text: "Room details sent to +91 XXXXX X1111: room 101, Rambagh Palace.", at: "2026-12-11T15:40:04+05:30" },
+  { id: "ntf_4", guestId: "g_3", stage: "airport", kind: "hotel", text: "Hotel notified: Vikram Gupta has arrived — room 102 at Rambagh Palace to be readied.", at: "2026-12-11T09:30:03+05:30" },
+  { id: "ntf_5", guestId: "g_3", stage: "airport", kind: "whatsapp", text: "Welcome message sent to +91 XXXXX X3333.", at: "2026-12-11T09:30:04+05:30" },
+];
+
 export const templates: MessageTemplate[] = [
-  { id: "tpl_1", name: "Save the date + RSVP", category: "marketing", body: "Hi {{guest_name}}, you're invited to {{function_name}}! Tap below to let us know if you can make it." },
-  { id: "tpl_2", name: "Travel details request", category: "utility", body: "Hi {{guest_name}}, please share your arrival details for {{event_name}} so we can arrange your pickup." },
+  { id: "tpl_1", name: "Save the date + RSVP", category: "marketing", body: "Hi {{guest_name}}, you're invited to {{event}}! Tap below to RSVP." },
+  { id: "tpl_2", name: "Travel details request", category: "utility", body: "Hi {{guest_name}}, please share your arrival details for {{event}}." },
   { id: "tpl_3", name: "ID upload request", category: "utility", body: "Hi {{guest_name}}, please send front and back photos of your ID for hotel check-in." },
-  { id: "tpl_4", name: "Function reminder", category: "utility", body: "Hi {{guest_name}}, a reminder that {{function_name}} starts soon. See you there!" },
+  { id: "tpl_4", name: "Welcome + room details", category: "utility", body: "Welcome {{guest_name}}! Your room is {{room}} at {{hotel}}." },
+  { id: "tpl_5", name: "Function reminder + RSVP", category: "utility", body: "Hi {{guest_name}}, a reminder about {{function_name}}. Tap below to RSVP." },
 ];
 
 export const campaigns: Campaign[] = [
-  { id: "cmp_1", eventId: "evt_1", name: "Save the date", templateId: "tpl_1", audience: { type: "all" }, segment: "All guests", recipients: 8, status: "sent", estimatedCost: 6.8, createdAt: "2026-10-20T10:45:00+05:30", sentAt: "2026-10-20T11:00:00+05:30" },
-  { id: "cmp_2", eventId: "evt_1", name: "Collect travel", templateId: "tpl_2", audience: { type: "function", functionId: "fn_4" }, segment: "Attending Pheras", recipients: 2, status: "draft", estimatedCost: 1.7, createdAt: "2026-10-21T09:30:00+05:30" },
-  { id: "cmp_3", eventId: "evt_1", name: "Collect IDs", templateId: "tpl_3", audience: { type: "tag", tag: "NRI" }, segment: "Tag: NRI", recipients: 2, status: "draft", estimatedCost: 1.7, createdAt: "2026-10-21T09:40:00+05:30" },
+  { id: "cmp_1", eventId: "evt_1", name: "Save the date", templateId: "tpl_1", segment: "All guests", audience: { kind: "all" }, recipients: 8, status: "sent", estimatedCost: 6.8, sentAt: "2026-10-20T11:00:00+05:30" },
+  { id: "cmp_2", eventId: "evt_1", name: "Collect travel", templateId: "tpl_2", segment: "Attending: Pheras", audience: { kind: "function", functionId: "fn_4" }, recipients: 3, status: "scheduled", estimatedCost: 2.55 },
+  { id: "cmp_3", eventId: "evt_1", name: "Collect IDs", templateId: "tpl_3", segment: "Missing ID", recipients: 5, status: "draft", estimatedCost: 4.25 },
 ];
 
 // Per-guest delivery log for campaigns that have actually gone out.
 export const messages: Message[] = [
-  { id: "msg_1", campaignId: "cmp_1", guestId: "g_1", status: "read", sentAt: "2026-10-20T11:00:05+05:30", deliveredAt: "2026-10-20T11:00:09+05:30", readAt: "2026-10-20T11:04:12+05:30" },
-  { id: "msg_2", campaignId: "cmp_1", guestId: "g_2", status: "delivered", sentAt: "2026-10-20T11:00:06+05:30", deliveredAt: "2026-10-20T11:00:10+05:30" },
-  { id: "msg_3", campaignId: "cmp_1", guestId: "g_3", status: "read", sentAt: "2026-10-20T11:00:07+05:30", deliveredAt: "2026-10-20T11:00:11+05:30", readAt: "2026-10-20T12:30:00+05:30" },
-  { id: "msg_4", campaignId: "cmp_1", guestId: "g_4", status: "delivered", sentAt: "2026-10-20T11:00:08+05:30", deliveredAt: "2026-10-20T11:00:12+05:30" },
-  { id: "msg_5", campaignId: "cmp_1", guestId: "g_5", status: "read", sentAt: "2026-10-20T11:00:09+05:30", deliveredAt: "2026-10-20T11:00:15+05:30", readAt: "2026-10-20T19:05:00+05:30" },
+  { id: "msg_1", campaignId: "cmp_1", guestId: "g_1", status: "read", sentAt: "2026-10-20T11:00:05+05:30" },
+  { id: "msg_2", campaignId: "cmp_1", guestId: "g_2", status: "delivered", sentAt: "2026-10-20T11:00:06+05:30" },
+  { id: "msg_3", campaignId: "cmp_1", guestId: "g_3", status: "read", sentAt: "2026-10-20T11:00:07+05:30" },
+  { id: "msg_4", campaignId: "cmp_1", guestId: "g_4", status: "delivered", sentAt: "2026-10-20T11:00:08+05:30" },
+  { id: "msg_5", campaignId: "cmp_1", guestId: "g_5", status: "read", sentAt: "2026-10-20T11:00:09+05:30" },
   { id: "msg_6", campaignId: "cmp_1", guestId: "g_6", status: "sent", sentAt: "2026-10-20T11:00:10+05:30" },
-  { id: "msg_7", campaignId: "cmp_1", guestId: "g_7", status: "read", sentAt: "2026-10-20T11:00:11+05:30", deliveredAt: "2026-10-20T11:00:14+05:30", readAt: "2026-10-20T11:20:00+05:30" },
+  { id: "msg_7", campaignId: "cmp_1", guestId: "g_7", status: "read", sentAt: "2026-10-20T11:00:11+05:30" },
   { id: "msg_8", campaignId: "cmp_1", guestId: "g_8", status: "failed", sentAt: "2026-10-20T11:00:12+05:30" },
 ];
 

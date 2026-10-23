@@ -5,7 +5,7 @@
 // refetch after a mutation without manipulating any store directly — they
 // just call the service again.
 
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 
 export function useAsyncData<T>(loader: () => Promise<T>, deps: unknown[] = []) {
   const [data, setData] = useState<T | undefined>(undefined);
@@ -40,9 +40,10 @@ export function useAsyncData<T>(loader: () => Promise<T>, deps: unknown[] = []) 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [...deps, requestToken]);
 
-  // Stable identity so callers can safely use it in effect dependencies
-  // (e.g. re-fetching from a service subscription).
-  const reload = useCallback(() => setRequestToken((t) => t + 1), []);
-
-  return { data, loading: requestToken !== resolvedToken, error, reload };
+  return {
+    data,
+    loading: requestToken !== resolvedToken,
+    error,
+    reload: () => setRequestToken((t) => t + 1),
+  };
 }

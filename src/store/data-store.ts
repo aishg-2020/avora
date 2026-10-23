@@ -21,6 +21,7 @@ import type {
   IdDocument,
   Message,
   MessageTemplate,
+  Notification,
   Party,
   Room,
   Rsvp,
@@ -39,6 +40,7 @@ export interface DataState {
   rooms: Room[];
   baggage: Baggage[];
   checkIns: CheckIn[];
+  notifications: Notification[];
   templates: MessageTemplate[];
   campaigns: Campaign[];
   messages: Message[];
@@ -68,6 +70,7 @@ function seedState(): DataState {
     rooms: structuredClone(seed.rooms),
     baggage: structuredClone(seed.baggage),
     checkIns: structuredClone(seed.checkIns),
+    notifications: structuredClone(seed.notifications),
     templates: structuredClone(seed.templates),
     campaigns: structuredClone(seed.campaigns),
     messages: structuredClone(seed.messages),

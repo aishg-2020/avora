@@ -1,281 +1,251 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 
 import { Badge, Button, Field, Modal, inputClassName } from "@/components/ui";
 import { formatINR } from "@/lib/format";
 import { SIDES } from "@/lib/guest-helpers";
-import { PLACEHOLDERS, renderTemplate, unknownPlaceholders } from "@/lib/templates";
-import type { Campaign, CampaignAudience, Guest, Side, TemplateCategory } from "@/lib/types";
+import { COST_PER_RECIPIENT_INR } from "@/lib/pricing";
+import { renderTemplate } from "@/lib/template";
+import type { CampaignAudience, Guest, Side, TemplateCategory } from "@/lib/types";
 import { useAsyncData } from "@/lib/use-async-data";
 import { CURRENT_EVENT_ID, getServices } from "@/services";
 
 type Step = "template" | "audience" | "review";
-const STEPS: { id: Step; label: string }[] = [
-  { id: "template", label: "Message" },
-  { id: "audience", label: "Audience" },
-  { id: "review", label: "Review & send" },
-];
+type AudienceKind = CampaignAudience["kind"];
 
 const NEW_TEMPLATE = "__new__";
+const PLACEHOLDER_HINT = "{{guest_name}} and {{function_name}} are replaced per recipient.";
 
 export function NewCampaignModal({
   open,
   onClose,
-  onDone,
+  onSent,
 }: {
   open: boolean;
   onClose: () => void;
-  /** Called with the created campaign; `sent` is true when it was also sent. */
-  onDone: (campaign: Campaign, sent: boolean) => void;
+  onSent: (campaignId: string) => void;
 }) {
-  const { data } = useAsyncData(async () => {
-    if (!open) return undefined;
+  const { data, reload: reloadStatic } = useAsyncData(() => {
     const { events, guests, messaging } = getServices();
-    const [event, functions, parties, guestList, templates, rate] = await Promise.all([
-      events.getEvent(CURRENT_EVENT_ID),
+    return Promise.all([
+      messaging.listTemplates(),
       events.listFunctions(CURRENT_EVENT_ID),
       guests.listParties(CURRENT_EVENT_ID),
       guests.listGuests(CURRENT_EVENT_ID),
-      messaging.listTemplates(),
-      messaging.getRatePerMessage(),
+      events.getEvent(CURRENT_EVENT_ID),
     ]);
-    return { event, functions, parties, guestList, templates, rate };
-  }, [open]);
+  }, []);
+  const [templates, functions, parties, guestList, event] = data ?? [[], [], [], [], undefined];
+
+  const allTags = useMemo(
+    () =>
+      Array.from(new Set([...parties.flatMap((p) => p.tags), ...guestList.flatMap((g) => g.tags ?? [])])).sort(),
+    [parties, guestList],
+  );
 
   const [step, setStep] = useState<Step>("template");
+  const [error, setError] = useState<string | null>(null);
+
+  // Step 1: template
   const [templateId, setTemplateId] = useState<string>("");
   const [newName, setNewName] = useState("");
   const [newCategory, setNewCategory] = useState<TemplateCategory>("utility");
-  const [newBody, setNewBody] = useState("Hi {{guest_name}}, ");
-  const [audienceType, setAudienceType] = useState<CampaignAudience["type"]>("all");
+  const [newBody, setNewBody] = useState("");
+
+  // Step 2: audience
+  const [kind, setKind] = useState<AudienceKind>("all");
   const [functionId, setFunctionId] = useState("");
   const [side, setSide] = useState<Side>("bride");
-  const [tag, setTag] = useState("");
+  const [tag, setTag] = useState("International");
+  // Last audience we resolved recipients for; displayed only while it still
+  // matches the current selection, so stale lists never flash.
+  const [resolved, setResolved] = useState<{ key: string; list: Guest[] } | null>(null);
+
+  // Step 3
   const [campaignName, setCampaignName] = useState("");
-  const [recipients, setRecipients] = useState<Guest[]>([]);
-  const [cost, setCost] = useState(0);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const bodyRef = useRef<HTMLTextAreaElement>(null);
+  const [sending, setSending] = useState(false);
 
-  const templates = useMemo(() => data?.templates ?? [], [data]);
-  const functions = useMemo(() => data?.functions ?? [], [data]);
-  const allTags = useMemo(() => {
-    const tags = new Set<string>(["International"]);
-    data?.parties.forEach((p) => p.tags.forEach((t) => tags.add(t)));
-    data?.guestList.forEach((g) => g.tags?.forEach((t) => tags.add(t)));
-    return Array.from(tags).sort();
-  }, [data]);
-
-  const audience: CampaignAudience = useMemo(() => {
-    switch (audienceType) {
+  const audience: CampaignAudience | null = useMemo(() => {
+    switch (kind) {
+      case "all":
+        return { kind: "all" };
       case "function":
-        return { type: "function", functionId: functionId || functions[0]?.id || "" };
+        return functionId ? { kind: "function", functionId } : null;
       case "side":
-        return { type: "side", side };
+        return { kind: "side", side };
       case "tag":
-        return { type: "tag", tag: tag || allTags[0] || "" };
-      default:
-        return { type: "all" };
+        return tag ? { kind: "tag", tag } : null;
     }
-  }, [audienceType, functionId, side, tag, functions, allTags]);
+  }, [kind, functionId, side, tag]);
 
-  // Recipient count / cost follow the audience as the user changes it.
+  // Live recipient preview whenever the audience changes.
+  const audienceKey = audience ? JSON.stringify(audience) : null;
   useEffect(() => {
-    if (!open || step === "template") return;
+    if (!open || !audience || !audienceKey) return;
     let cancelled = false;
-    const { messaging } = getServices();
-    messaging.resolveAudience(CURRENT_EVENT_ID, audience).then(async (guests) => {
-      if (cancelled) return;
-      const estimate = templateId && templateId !== NEW_TEMPLATE ? await messaging.estimateCost(templateId, guests) : 0;
-      if (cancelled) return;
-      setRecipients(guests);
-      setCost(estimate);
-    });
+    getServices()
+      .messaging.previewRecipients(CURRENT_EVENT_ID, audience)
+      .then((list) => {
+        if (!cancelled) setResolved({ key: audienceKey, list });
+      });
     return () => {
       cancelled = true;
     };
-  }, [open, step, audience, templateId]);
+  }, [open, audience, audienceKey]);
+  const recipients = resolved && resolved.key === audienceKey ? resolved.list : null;
 
-  const selectedTemplate = templates.find((t) => t.id === templateId);
   const creatingTemplate = templateId === NEW_TEMPLATE;
-  const bodyForPreview = creatingTemplate ? newBody : (selectedTemplate?.body ?? "");
-  const unknown = unknownPlaceholders(bodyForPreview);
+  const selectedTemplate = templates.find((t) => t.id === templateId);
+  const effectiveBody = creatingTemplate ? newBody : selectedTemplate?.body ?? "";
+  const effectiveTemplateName = creatingTemplate ? newName : selectedTemplate?.name ?? "";
 
-  function insertPlaceholder(token: string) {
-    const el = bodyRef.current;
-    if (!el) {
-      setNewBody((b) => b + token);
-      return;
-    }
-    const start = el.selectionStart ?? newBody.length;
-    const end = el.selectionEnd ?? newBody.length;
-    const next = newBody.slice(0, start) + token + newBody.slice(end);
-    setNewBody(next);
-    requestAnimationFrame(() => {
-      el.focus();
-      el.setSelectionRange(start + token.length, start + token.length);
-    });
-  }
+  const targetFunction = functions.find((f) => f.id === (kind === "function" ? functionId : ""));
+  const sampleGuest = recipients?.[0];
+  const samplePreview = renderTemplate(effectiveBody, {
+    guestName: sampleGuest?.name ?? "Guest",
+    functionName: targetFunction?.name ?? event?.name ?? "the celebrations",
+    eventName: event?.name ?? "the celebrations",
+    room: "101",
+    hotel: "Rambagh Palace",
+  });
 
-  async function nextFromTemplate() {
-    setError(null);
-    if (!templateId) {
+  const estimatedCost = (recipients?.length ?? 0) * COST_PER_RECIPIENT_INR;
+
+  function goToAudience() {
+    if (creatingTemplate) {
+      if (!newName.trim() || !newBody.trim()) {
+        setError("Give the new template a name and a message body.");
+        return;
+      }
+    } else if (!selectedTemplate) {
       setError("Pick a template or create a new one.");
       return;
     }
-    if (creatingTemplate) {
-      if (!newName.trim() || !newBody.trim()) {
-        setError("Give the new template a name and a message.");
-        return;
-      }
-      setBusy(true);
-      try {
-        const created = await getServices().messaging.createTemplate({ name: newName, category: newCategory, body: newBody });
-        setTemplateId(created.id);
-        if (!campaignName) setCampaignName(created.name);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Could not save the template.");
-        return;
-      } finally {
-        setBusy(false);
-      }
-    } else if (!campaignName && selectedTemplate) {
-      setCampaignName(selectedTemplate.name);
-    }
+    setError(null);
     setStep("audience");
   }
 
-  async function finish(send: boolean) {
-    setBusy(true);
+  function goToReview() {
+    if (!audience) {
+      setError(kind === "function" ? "Pick a function." : "Pick a tag.");
+      return;
+    }
+    setError(null);
+    if (!campaignName.trim()) setCampaignName(effectiveTemplateName);
+    setStep("review");
+  }
+
+  async function confirmSend() {
+    if (!audience || (recipients?.length ?? 0) === 0) return;
+    setSending(true);
     setError(null);
     try {
       const { messaging } = getServices();
-      let campaign = await messaging.createCampaign({
+      let finalTemplateId = templateId;
+      if (creatingTemplate) {
+        const created = await messaging.createTemplate({ name: newName, category: newCategory, body: newBody });
+        finalTemplateId = created.id;
+        reloadStatic();
+      }
+      const campaign = await messaging.createCampaign({
         eventId: CURRENT_EVENT_ID,
-        name: campaignName,
-        templateId,
+        name: campaignName || effectiveTemplateName,
+        templateId: finalTemplateId,
         audience,
       });
-      if (send) campaign = await messaging.sendCampaign(campaign.id);
-      onDone(campaign, send);
+      await messaging.sendCampaign(campaign.id);
+      onSent(campaign.id);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong.");
-      setBusy(false);
+      setSending(false);
     }
   }
 
-  const previewGuest = recipients[0] ?? data?.guestList[0];
-  const previewText = renderTemplate(bodyForPreview, {
-    guestName: previewGuest?.name.split(" ")[0] ?? "Guest",
-    functionName: audience.type === "function" ? functions.find((f) => f.id === audience.functionId)?.name : undefined,
-    eventName: data?.event?.name ?? "the event",
-  });
+  const stepIndex = step === "template" ? 1 : step === "audience" ? 2 : 3;
 
   return (
-    <Modal open={open} onClose={onClose} title="New campaign" wide>
-      <ol className="mb-5 flex gap-2 text-xs">
-        {STEPS.map((s, i) => {
-          const active = s.id === step;
-          const done = STEPS.findIndex((x) => x.id === step) > i;
-          return (
-            <li
-              key={s.id}
-              className={`flex items-center gap-1.5 rounded-full px-2.5 py-1 ${
-                active ? "bg-accent text-white" : done ? "bg-surface text-foreground" : "bg-surface text-muted"
-              }`}
-            >
-              <span className="font-semibold">{i + 1}</span> {s.label}
-            </li>
-          );
-        })}
-      </ol>
-
+    <Modal open={open} onClose={onClose} title={`New campaign · step ${stepIndex} of 3`} wide>
       {step === "template" && (
         <div className="space-y-4">
-          <div className="grid gap-2 sm:grid-cols-2">
+          <p className="text-sm text-muted">Choose the message to send. {PLACEHOLDER_HINT}</p>
+          <div className="grid max-h-64 grid-cols-1 gap-2 overflow-y-auto sm:grid-cols-2">
             {templates.map((t) => (
               <label
                 key={t.id}
-                className={`cursor-pointer rounded-lg border p-3 text-sm transition ${
-                  templateId === t.id ? "border-accent bg-surface" : "border-border hover:border-accent"
+                className={`cursor-pointer rounded-lg border p-3 transition ${
+                  templateId === t.id ? "border-accent" : "border-border hover:border-accent/50"
                 }`}
               >
-                <div className="flex items-center justify-between gap-2">
-                  <span className="flex items-center gap-2">
-                    <input type="radio" name="template" checked={templateId === t.id} onChange={() => setTemplateId(t.id)} />
-                    <span className="font-medium">{t.name}</span>
-                  </span>
+                <input
+                  type="radio"
+                  name="template"
+                  className="sr-only"
+                  checked={templateId === t.id}
+                  onChange={() => setTemplateId(t.id)}
+                />
+                <div className="mb-1 flex items-center justify-between gap-2">
+                  <span className="text-sm font-medium">{t.name}</span>
                   <Badge>{t.category}</Badge>
                 </div>
-                <p className="mt-1.5 text-xs text-muted">{t.body}</p>
+                <p className="text-xs text-muted">{t.body}</p>
               </label>
             ))}
             <label
-              className={`cursor-pointer rounded-lg border border-dashed p-3 text-sm transition ${
-                creatingTemplate ? "border-accent bg-surface" : "border-border hover:border-accent"
+              className={`cursor-pointer rounded-lg border border-dashed p-3 transition ${
+                creatingTemplate ? "border-accent" : "border-border hover:border-accent/50"
               }`}
             >
-              <span className="flex items-center gap-2">
-                <input type="radio" name="template" checked={creatingTemplate} onChange={() => setTemplateId(NEW_TEMPLATE)} />
-                <span className="font-medium">+ Write a new template</span>
-              </span>
+              <input
+                type="radio"
+                name="template"
+                className="sr-only"
+                checked={creatingTemplate}
+                onChange={() => setTemplateId(NEW_TEMPLATE)}
+              />
+              <span className="text-sm font-medium">+ New template…</span>
+              <p className="text-xs text-muted">Write a fresh message with placeholders.</p>
             </label>
           </div>
 
           {creatingTemplate && (
-            <div className="space-y-3 rounded-lg border border-border p-3">
-              <div className="grid gap-3 sm:grid-cols-2">
+            <div className="space-y-3 rounded-lg border border-dashed border-border p-3">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <Field label="Template name">
-                  <input className={inputClassName} value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="Sangeet reminder" autoFocus />
+                  <input className={inputClassName} value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="Sangeet reminder" />
                 </Field>
-                <Field label="Category" hint="Marketing needs opt-in; utility is transactional.">
+                <Field label="Category">
                   <select className={inputClassName} value={newCategory} onChange={(e) => setNewCategory(e.target.value as TemplateCategory)}>
                     <option value="utility">utility</option>
                     <option value="marketing">marketing</option>
                   </select>
                 </Field>
               </div>
-              <Field label="Message">
-                <textarea ref={bodyRef} className={`${inputClassName} min-h-24`} value={newBody} onChange={(e) => setNewBody(e.target.value)} />
+              <Field label="Message body" hint={PLACEHOLDER_HINT}>
+                <textarea
+                  className={`${inputClassName} min-h-24`}
+                  value={newBody}
+                  onChange={(e) => setNewBody(e.target.value)}
+                  placeholder="Hi {{guest_name}}, see you at {{function_name}}!"
+                />
               </Field>
-              <div className="flex flex-wrap items-center gap-2 text-xs">
-                <span className="text-muted">Insert:</span>
-                {PLACEHOLDERS.map((p) => (
-                  <button
-                    key={p.token}
-                    type="button"
-                    onClick={() => insertPlaceholder(p.token)}
-                    title={p.description}
-                    className="rounded-full border border-border px-2 py-0.5 font-mono hover:border-accent"
-                  >
-                    {p.token}
-                  </button>
+              <div className="flex gap-2">
+                {["{{guest_name}}", "{{function_name}}"].map((ph) => (
+                  <Button key={ph} variant="secondary" onClick={() => setNewBody((b) => `${b}${b.endsWith(" ") || b === "" ? "" : " "}${ph}`)}>
+                    Insert {ph}
+                  </Button>
                 ))}
               </div>
             </div>
           )}
 
-          {bodyForPreview && (
-            <div className="rounded-lg bg-surface p-3 text-sm">
-              <p className="mb-1 text-xs text-muted">Preview for {previewGuest?.name ?? "a guest"}</p>
-              <p>{previewText}</p>
-              {unknown.length > 0 && (
-                <p className="mt-1 text-xs text-amber-700 dark:text-amber-400">
-                  Unknown placeholder{unknown.length > 1 ? "s" : ""}: {unknown.join(", ")} — will be sent as-is.
-                </p>
-              )}
-            </div>
-          )}
-
           {error && <p className="text-sm text-rose-600 dark:text-rose-400">{error}</p>}
           <div className="flex justify-end gap-2 pt-2">
-            <Button variant="ghost" onClick={onClose} disabled={busy}>
+            <Button variant="ghost" onClick={onClose}>
               Cancel
             </Button>
-            <Button variant="primary" onClick={nextFromTemplate} disabled={busy}>
-              {busy ? "Saving…" : "Next: audience"}
+            <Button variant="primary" onClick={goToAudience}>
+              Next: audience
             </Button>
           </div>
         </div>
@@ -283,69 +253,63 @@ export function NewCampaignModal({
 
       {step === "audience" && (
         <div className="space-y-4">
-          <div className="space-y-2 text-sm">
-            <AudienceOption checked={audienceType === "all"} onChange={() => setAudienceType("all")} label="All guests" />
-            <AudienceOption checked={audienceType === "function"} onChange={() => setAudienceType("function")} label="Attendees of a function">
-              <select
-                className={inputClassName}
-                value={audience.type === "function" ? audience.functionId : ""}
-                onChange={(e) => setFunctionId(e.target.value)}
-                disabled={audienceType !== "function"}
-              >
-                {functions.map((f) => (
-                  <option key={f.id} value={f.id}>
-                    {f.name}
-                  </option>
-                ))}
-              </select>
+          <p className="text-sm text-muted">Who should receive “{effectiveTemplateName}”?</p>
+          <div className="space-y-2">
+            <AudienceOption checked={kind === "all"} onSelect={() => setKind("all")} label="All guests" />
+            <AudienceOption checked={kind === "function"} onSelect={() => setKind("function")} label="Attending a specific function">
+              {kind === "function" && (
+                <select className={inputClassName} value={functionId} onChange={(e) => setFunctionId(e.target.value)}>
+                  <option value="">Pick a function…</option>
+                  {functions.map((f) => (
+                    <option key={f.id} value={f.id}>
+                      {f.name}
+                    </option>
+                  ))}
+                </select>
+              )}
             </AudienceOption>
-            <AudienceOption checked={audienceType === "side"} onChange={() => setAudienceType("side")} label="Guests by side">
-              <select className={inputClassName} value={side} onChange={(e) => setSide(e.target.value as Side)} disabled={audienceType !== "side"}>
-                {SIDES.map((s) => (
-                  <option key={s} value={s}>
-                    {s}
-                  </option>
-                ))}
-              </select>
+            <AudienceOption checked={kind === "side"} onSelect={() => setKind("side")} label="By side">
+              {kind === "side" && (
+                <select className={inputClassName} value={side} onChange={(e) => setSide(e.target.value as Side)}>
+                  {SIDES.map((s) => (
+                    <option key={s} value={s}>
+                      {s}
+                    </option>
+                  ))}
+                </select>
+              )}
             </AudienceOption>
-            <AudienceOption checked={audienceType === "tag"} onChange={() => setAudienceType("tag")} label="Guests by tag">
-              <select
-                className={inputClassName}
-                value={audience.type === "tag" ? audience.tag : ""}
-                onChange={(e) => setTag(e.target.value)}
-                disabled={audienceType !== "tag"}
-              >
-                {allTags.map((t) => (
-                  <option key={t} value={t}>
-                    {t}
-                  </option>
-                ))}
-              </select>
+            <AudienceOption checked={kind === "tag"} onSelect={() => setKind("tag")} label="By tag">
+              {kind === "tag" && (
+                <select className={inputClassName} value={tag} onChange={(e) => setTag(e.target.value)}>
+                  <option value="International">International</option>
+                  {allTags.map((t) => (
+                    <option key={t} value={t}>
+                      {t}
+                    </option>
+                  ))}
+                </select>
+              )}
             </AudienceOption>
           </div>
 
-          <div className="rounded-lg bg-surface p-3 text-sm">
-            <p>
-              <strong>{recipients.length}</strong> recipient{recipients.length === 1 ? "" : "s"} · estimated{" "}
-              <strong>{formatINR(cost)}</strong>{" "}
-              <span className="text-muted">({formatINR(data?.rate ?? 0)} per recipient)</span>
-            </p>
-            {recipients.length > 0 && (
-              <p className="mt-1 text-xs text-muted">
-                {recipients
-                  .slice(0, 6)
-                  .map((g) => g.name)
-                  .join(", ")}
-                {recipients.length > 6 ? ` +${recipients.length - 6} more` : ""}
-              </p>
+          <p className="text-sm">
+            {recipients === null ? (
+              <span className="text-muted">Select an audience to see who it reaches.</span>
+            ) : (
+              <>
+                <strong>{recipients.length}</strong> recipient{recipients.length === 1 ? "" : "s"} ·{" "}
+                {formatINR(COST_PER_RECIPIENT_INR)} each · est. <strong>{formatINR(estimatedCost)}</strong>
+              </>
             )}
-          </div>
+          </p>
 
+          {error && <p className="text-sm text-rose-600 dark:text-rose-400">{error}</p>}
           <div className="flex justify-between pt-2">
             <Button variant="ghost" onClick={() => setStep("template")}>
               Back
             </Button>
-            <Button variant="primary" onClick={() => setStep("review")} disabled={recipients.length === 0}>
+            <Button variant="primary" onClick={goToReview}>
               Next: review
             </Button>
           </div>
@@ -358,49 +322,58 @@ export function NewCampaignModal({
             <input className={inputClassName} value={campaignName} onChange={(e) => setCampaignName(e.target.value)} />
           </Field>
 
-          <dl className="grid grid-cols-2 gap-x-6 gap-y-3 rounded-lg border border-border p-4 text-sm sm:grid-cols-4">
+          <div className="grid grid-cols-2 gap-x-8 gap-y-3 rounded-lg border border-border p-4 text-sm sm:grid-cols-4">
             <div>
-              <dt className="text-xs text-muted">Template</dt>
-              <dd className="font-medium">{selectedTemplate?.name}</dd>
-            </div>
-            <div>
-              <dt className="text-xs text-muted">Audience</dt>
-              <dd className="font-medium">
-                {audience.type === "all" && "All guests"}
-                {audience.type === "function" && `Attending ${functions.find((f) => f.id === audience.functionId)?.name}`}
-                {audience.type === "side" && `${audience.side} side`}
-                {audience.type === "tag" && `Tag: ${audience.tag}`}
-              </dd>
+              <p className="text-muted">Template</p>
+              <p className="font-medium">{effectiveTemplateName}</p>
             </div>
             <div>
-              <dt className="text-xs text-muted">Recipients</dt>
-              <dd className="font-medium">{recipients.length}</dd>
+              <p className="text-muted">Audience</p>
+              <p className="font-medium">
+                {kind === "all" && "All guests"}
+                {kind === "function" && `Attending: ${targetFunction?.name}`}
+                {kind === "side" && `Side: ${side}`}
+                {kind === "tag" && `Tag: ${tag}`}
+              </p>
             </div>
             <div>
-              <dt className="text-xs text-muted">Estimated cost</dt>
-              <dd className="font-medium">
-                {formatINR(cost)} <span className="text-xs text-muted">@ {formatINR(data?.rate ?? 0)}</span>
-              </dd>
+              <p className="text-muted">Recipients</p>
+              <p className="font-medium">{recipients?.length ?? 0}</p>
             </div>
-            <div className="col-span-2 sm:col-span-4">
-              <dt className="text-xs text-muted">Message as {previewGuest?.name ?? "a guest"} will see it</dt>
-              <dd className="mt-1 rounded-lg bg-[#dcf8c6] px-3 py-2 text-neutral-900">{previewText}</dd>
+            <div>
+              <p className="text-muted">Estimated cost</p>
+              <p className="font-medium">
+                {formatINR(estimatedCost)} <span className="font-normal text-muted">({formatINR(COST_PER_RECIPIENT_INR)}/recipient)</span>
+              </p>
             </div>
-          </dl>
+          </div>
+
+          <div>
+            <p className="mb-1 text-sm text-muted">
+              Message preview{sampleGuest ? ` (as ${sampleGuest.name})` : ""}
+            </p>
+            <div className="w-fit max-w-full rounded-lg rounded-tl-none bg-surface px-3 py-2 text-sm shadow-sm">
+              {samplePreview || <span className="text-muted">—</span>}
+            </div>
+          </div>
+
+          {recipients && recipients.length > 0 ? (
+            <p className="text-xs text-muted">
+              Sending to: {recipients.slice(0, 6).map((g) => g.name).join(", ")}
+              {recipients.length > 6 && ` and ${recipients.length - 6} more`}
+            </p>
+          ) : (
+            <p className="text-sm text-amber-700 dark:text-amber-400">No recipients match this audience.</p>
+          )}
 
           {error && <p className="text-sm text-rose-600 dark:text-rose-400">{error}</p>}
-          <div className="flex flex-wrap justify-between gap-2 pt-2">
-            <Button variant="ghost" onClick={() => setStep("audience")} disabled={busy}>
+          <div className="flex justify-between pt-2">
+            <Button variant="ghost" onClick={() => setStep("audience")} disabled={sending}>
               Back
             </Button>
-            <div className="flex gap-2">
-              <Button variant="secondary" onClick={() => finish(false)} disabled={busy}>
-                Save as draft
-              </Button>
-              <Button variant="primary" onClick={() => finish(true)} disabled={busy || recipients.length === 0}>
-                {busy ? "Sending…" : `Confirm & send to ${recipients.length}`}
-              </Button>
-            </div>
+            <Button variant="primary" onClick={confirmSend} disabled={sending || (recipients?.length ?? 0) === 0}>
+              {sending ? "Sending…" : `Confirm & send to ${recipients?.length ?? 0}`}
+            </Button>
           </div>
         </div>
       )}
@@ -410,22 +383,22 @@ export function NewCampaignModal({
 
 function AudienceOption({
   checked,
-  onChange,
+  onSelect,
   label,
   children,
 }: {
   checked: boolean;
-  onChange: () => void;
+  onSelect: () => void;
   label: string;
   children?: ReactNode;
 }) {
   return (
-    <div className={`rounded-lg border p-3 ${checked ? "border-accent bg-surface" : "border-border"}`}>
-      <label className="flex cursor-pointer items-center gap-2">
-        <input type="radio" name="audience" checked={checked} onChange={onChange} />
-        <span className="font-medium">{label}</span>
+    <div className={`rounded-lg border p-3 transition ${checked ? "border-accent" : "border-border"}`}>
+      <label className="flex cursor-pointer items-center gap-2 text-sm font-medium">
+        <input type="radio" name="audience" checked={checked} onChange={onSelect} />
+        {label}
       </label>
-      {children && <div className="mt-2 pl-6">{children}</div>}
+      {children && <div className="mt-2">{children}</div>}
     </div>
   );
 }
